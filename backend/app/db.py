@@ -138,6 +138,16 @@ def resolve_item(text: str) -> str | None:
     return None
 
 
+def resolve_room(text: str) -> str | None:
+    """Map spoken text ("the kitchen", "living room") to a stored room name, or None."""
+    t = text.strip().lower()
+    for prefix in ("the ", "my "):
+        if t.startswith(prefix):
+            t = t[len(prefix):]
+    squash = t.replace(" ", "")
+    return next((r for r in get_profile()["rooms"] if r == t or r.replace(" ", "") == squash), None)
+
+
 # ---- sightings --------------------------------------------------------------------------
 
 def save_thumb(frame: bytes, box: list[float]) -> str:

@@ -5,6 +5,7 @@ import pytest
 from PIL import Image
 
 os.environ["PERCEPTRON_MODE"] = "mock"
+os.environ["LLM_PROVIDER"] = "mock"   # a teammate's .env must never make tests hit the network
 
 
 @pytest.fixture()
@@ -13,6 +14,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("THUMBS_DIR", str(tmp_path / "thumbs"))
     monkeypatch.setenv("PERCEPTRON_MODE", "mock")
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
     from fastapi.testclient import TestClient
     from app import main, vision
     vision.reset_vision()

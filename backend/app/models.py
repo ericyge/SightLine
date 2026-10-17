@@ -85,3 +85,24 @@ class HealthResponse(BaseModel):
     ok: bool = True
     mode: str
     mock: bool
+
+
+class ChatTurn(BaseModel):
+    """One earlier turn of the conversation."""
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=500)
+
+
+class ChatRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
+    history: list[ChatTurn] = Field(default_factory=list)   # only the last 6 are used
+    current_room: str | None = None
+
+
+class ChatResponse(BaseModel):
+    """item is set for find/where, room for set_room. say is always what to speak."""
+    intent: Literal["find", "where", "stop", "set_room", "chitchat"]
+    item: str | None = None
+    room: str | None = None
+    say: str
+    provider: str

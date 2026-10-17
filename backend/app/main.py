@@ -17,15 +17,17 @@ from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 
-from . import db, guidance  # noqa: E402
+from . import db, guidance, llm  # noqa: E402
 from .events import broadcaster  # noqa: E402
-from .models import (GuideResponse, HealthResponse, ObserveResponse, OkResponse, Profile,  # noqa: E402
+from .models import (ChatRequest, ChatResponse, GuideResponse, HealthResponse, ObserveResponse, OkResponse, Profile,  # noqa: E402
                      WhereLast, WhereResponse)
 from .vision import get_vision  # noqa: E402
 
 log = logging.getLogger("sightline")
 MAX_EVENT_FRAME_BYTES = 200_000   # frames are only forwarded live to the dashboard, never stored
 GUIDE_STATE_TTL_S = 10.0          # a pause this long starts a fresh guidance session
+CHAT_HISTORY_TURNS = 6
+MAX_CHAT_SAY_CHARS = 200
 
 _guide_states: dict[str, guidance.GuideState] = {}
 
@@ -34,8 +36,9 @@ _guide_states: dict[str, guidance.GuideState] = {}
 async def lifespan(app: FastAPI):
     """Log loudly when mock vision is active."""
     vision = get_vision()
-    log.warning("Sightline backend up. vision mode = %s%s", vision.mode,
-                " (MOCK: fake detections, no API key needed)" if vision.mock else "")
+    log.warning("Sightline backend up. vision mode = %s%s; LLM provider = %s", vision.mode,
+                " (MOCK: fake detections, no API key needed)" if vision.mock else "",
+                llm.get_llm().provider)
     db.thumbs_dir().mkdir(parents=True, exist_ok=True)
     yield
 
@@ -138,25 +141,29 @@ async def observe(request: Request, frame: UploadFile = File(...), room: str = F
     return {"sightings": sightings}
 
 
-@app.get("/api/where", response_model=WhereResponse)
-async def where(item: str):
-    """Where was this item last seen? Always 200; found=false when never seen."""
+def _where_answer(item: str) -> WhereResponse:
+    """Answer "where is X" from stored sightings (shared by /api/where and /api/chat)."""
     name = db.resolve_item(item)
     history = db.recent_sightings(name, 5) if name else []
     if not history:
         label = name or item.strip().lower()
         text = (f"I haven't seen your {label} yet." if name
                 else f"I'm not watching for {label}.")
-        broadcaster.publish(_event("say", text=text, source="where"))
         return WhereResponse(item=label, found=False, say=text)
     last = history[0]
     minutes = max(0.0, (datetime.now(timezone.utc) - _parse_ts(last["ts"])).total_seconds() / 60)
-    text = where_say(last["room"], last["spot"], minutes)
-    broadcaster.publish(_event("say", text=text, source="where"))
     return WhereResponse(
-        item=name, history=history, say=text,
+        item=name, history=history, say=where_say(last["room"], last["spot"], minutes),
         last=WhereLast(room=last["room"], spot=last["spot"], minutes_ago=round(minutes, 1),
                        thumb=last["thumb"], confidence=last["confidence"]))
+
+
+@app.get("/api/where", response_model=WhereResponse)
+async def where(item: str):
+    """Where was this item last seen? Always 200; found=false when never seen."""
+    answer = _where_answer(item)
+    broadcaster.publish(_event("say", text=answer.say, source="where"))
+    return answer
 
 
 @app.post("/api/guide", response_model=GuideResponse)
@@ -181,6 +188,62 @@ async def guide(request: Request, frame: UploadFile = File(...), item: str = For
     if result["say"]:
         broadcaster.publish(_event("say", text=result["say"], source="guide"))
     return result
+
+
+def _chitchat(say: str, provider: str) -> ChatResponse:
+    return ChatResponse(intent="chitchat", say=say, provider=provider)
+
+
+def _ask_item(provider: str) -> ChatResponse:
+    """One short clarifying question listing a few watched items."""
+    names = [i["name"] for i in db.list_items()][:3]
+    return _chitchat(f"Which item? I can find {', '.join(names)}." if names
+                     else "Which item do you mean?", provider)
+
+
+def _chat_response(result: llm.LLMResult, provider: str) -> ChatResponse:
+    """Turn the model's tool call into an intent. Item/room are validated against the profile
+    and spoken text for find/where/stop/set_room comes from the app, never from the model."""
+    if not result.tool_calls:
+        say = " ".join(result.text.split())[:MAX_CHAT_SAY_CHARS]
+        return _chitchat(say or "Sorry, I didn't catch that.", provider)
+    call = result.tool_calls[0]
+    args = call.arguments
+    if call.name == "stop_guidance":
+        return ChatResponse(intent="stop", say="Stopped.", provider=provider)
+    if call.name == "set_room":
+        room = db.resolve_room(str(args.get("room", "")))
+        if room is None:
+            known = ", ".join(db.get_profile()["rooms"][:3])
+            return _chitchat(f"Which room? I know {known}.", provider)
+        return ChatResponse(intent="set_room", room=room, say=f"Okay, you're in the {room}.",
+                            provider=provider)
+    if call.name in ("find_item", "where_is_item"):
+        name = db.resolve_item(str(args.get("item", "")))
+        if name is None:
+            return _ask_item(provider)
+        if call.name == "find_item":
+            return ChatResponse(intent="find", item=name, say=f"Looking for your {name}.",
+                                provider=provider)
+        return ChatResponse(intent="where", item=name, say=_where_answer(name).say,
+                            provider=provider)
+    return _chitchat("Sorry, I didn't catch that.", provider)
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest):
+    """Work out what the user wants from natural speech (see docs/CONTRACT.md)."""
+    profile = db.get_profile()
+    system = llm.build_system_prompt(db.list_items(), profile["rooms"], req.current_room)
+    messages = [{"role": "system", "content": system},
+                *[t.model_dump() for t in req.history[-CHAT_HISTORY_TURNS:]],
+                {"role": "user", "content": req.text}]
+    result, provider = await run_in_threadpool(llm.chat_with_fallback, messages)
+    resp = _chat_response(result, provider)
+    # The dashboard sees the text live; nothing here is stored in the database.
+    broadcaster.publish(_event("chat", user_text=req.text, intent=resp.intent, item=resp.item,
+                               say=resp.say, provider=provider))
+    return resp
 
 
 @app.websocket("/ws/events")
