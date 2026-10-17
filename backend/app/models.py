@@ -1,0 +1,87 @@
+"""Pydantic models for every request/response. Field names match docs/CONTRACT.md exactly."""
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+GuidanceStyle = Literal["clock_face", "left_right", "beeps_only"]
+Distance = Literal["far", "near", "reach"]
+
+
+class Item(BaseModel):
+    """A watched item."""
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class Room(BaseModel):
+    """A room the user can be in."""
+    name: str
+
+
+class Sighting(BaseModel):
+    """One saved sighting. box is [x1, y1, x2, y2] normalized 0..1."""
+    item: str
+    room: str
+    spot: str
+    box: list[float]
+    confidence: float
+    ts: str
+    thumb: str
+
+
+class ObserveResponse(BaseModel):
+    sightings: list[Sighting]
+
+
+class WhereLast(BaseModel):
+    room: str
+    spot: str
+    minutes_ago: float
+    thumb: str
+    confidence: float
+
+
+class WhereResponse(BaseModel):
+    """found=False means never seen: only item, found and say are meaningful."""
+    item: str
+    found: bool = True
+    last: WhereLast | None = None
+    history: list[Sighting] = Field(default_factory=list)
+    say: str
+
+
+class GuideResponse(BaseModel):
+    """When found=False, geometry fields are null and beep_ms is 0 (silence)."""
+    found: bool
+    point: list[float] | None = None
+    box: list[float] | None = None
+    angle: float | None = None
+    clock: int | None = None
+    distance: Distance | None = None
+    pan: float = 0.0
+    say: str = ""
+    beep_ms: int = 0
+
+
+class WatchItem(BaseModel):
+    """Profile watchlist entry (what the Purple setup agent produces)."""
+    name: str
+    description: str = ""
+    home_spot: str = ""
+
+
+class Profile(BaseModel):
+    watchlist: list[WatchItem]
+    rooms: list[str]
+    guidance_style: GuidanceStyle = "clock_face"
+
+
+class OkResponse(BaseModel):
+    ok: bool = True
+
+
+class HealthResponse(BaseModel):
+    ok: bool = True
+    mode: str
+    mock: bool

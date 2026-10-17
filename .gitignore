@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Node
+node_modules/
+web/dist/
+
+# Secrets and local data
+.env
+*.db
+*.db-journal
+uploads/
+thumbs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
