@@ -66,6 +66,11 @@ def listen_and_transcribe() -> str:
     """
     config = Config.load()  # Fail before recording if the key is absent.
     audio = _record_wav()
+    return transcribe_wav(audio, config)
+
+
+def transcribe_wav(audio: bytes, config: Config) -> str:
+    """Shared upload path for manual and hands-free capture."""
     response = post(
         "/speech-to-text", config,
         data={"model_id": config.stt_model, "tag_audio_events": "false", "diarize": "false"},

@@ -8,6 +8,7 @@ from .adapter import extract_steps
 from .config import AudioError, Config, ROOT
 from .devices import sounddevice
 from .provider import post
+from .controls import play_pcm
 
 SAMPLE_RATE = 24000
 
@@ -67,8 +68,8 @@ def speak_directions(payload: dict | str | Path, *, play: bool = True,
                 samples.byteswap()
                 pcm = samples.tobytes()
             try:
-                with sd.RawOutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16") as stream:
-                    stream.write(pcm)
+                if not play_pcm(sd, pcm, SAMPLE_RATE):
+                    break
             except Exception as exc:
                 raise AudioError("Audio playback failed. Check your default speaker/output device.") from exc
     return saved

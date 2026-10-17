@@ -10,3 +10,7 @@ generated/
 *.ogg
 *.flac
 *.m4a
+models/*
+!models/README.md
+*.onnx
+*.tflite
