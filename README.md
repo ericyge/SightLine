@@ -105,6 +105,14 @@ LLM_BASE_URL=...  LLM_API_KEY=...  LLM_MODEL=...
 ```
 Privacy: only your words, the last 6 turns, and item/alias/room names go to a provider, never camera frames, thumbnails or sighting history. Details: `docs/CONTRACT.md`.
 
+### Speech-to-text (optional)
+By default the phone page uses the browser's built-in speech recognition (Chrome/Edge; no keys). For a more reliable, any-browser option, set in `.env` and restart the backend:
+```
+STT_PROVIDER=elevenlabs
+ELEVENLABS_API_KEY=...
+```
+The phone then records a short clip while you hold the button and the backend sends it to ElevenLabs for the transcript, which goes to `/api/chat` and Gemini as before. **The audio leaves your machine to ElevenLabs** (it is not stored or logged). If ElevenLabs fails, the phone falls back to browser recognition. Details: `docs/CONTRACT.md`.
+
 ## Layout
 
 | Path                       | What                                                                                                                              |

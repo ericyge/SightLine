@@ -15,6 +15,13 @@ export const postProfile = (profile) =>
     body: JSON.stringify(profile),
   }).then(json);
 
+/** Upload a short WAV for server-side speech-to-text. Resolves {text, provider}. */
+export function transcribe(wav) {
+  const body = new FormData();
+  body.append("audio", wav, "recording.wav");
+  return fetch("/api/transcribe", { method: "POST", body }).then(json);
+}
+
 const CHAT_TIMEOUT_MS = 4000; // backend gives the model 3 s; this guards a dead server
 
 /** Ask the backend what the user wants. history: last turns as {role, content}. */

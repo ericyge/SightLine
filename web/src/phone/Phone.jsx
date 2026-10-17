@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "./api.js";
 import { createBeeper, panFromAngle, pitchBoost, unlockAudio } from "./audio.js";
 import { listen, parseCommand, recognitionSupported, speak, unlockSpeech } from "./speech.js";
+import { startRecording } from "./recorder.js";
 import {
   compensate, getYaw, requestOrientationPermission, startOrientation, stopOrientation,
 } from "./orientation.js";
@@ -57,6 +58,9 @@ export default function Phone() {
   const [guiding, setGuiding] = useState(null); // item name while in guidance mode
   const [listening, setListening] = useState(false);
   const [mock, setMock] = useState(false);
+  // "elevenlabs": record audio and send it to /api/transcribe. "browser": built-in SpeechRecognition.
+  const [sttMode, setSttMode] = useState("browser");
+  const recorderRef = useRef(null); // promise of the active recording while the button is held
   const roomRef = useRef(room);
   const guideRef = useRef({ last: null, yawAtLast: null, at: 0 });
   const stopListenRef = useRef(null);
@@ -65,7 +69,7 @@ export default function Phone() {
 
   useEffect(() => {
     api.getProfile().then((p) => { setRooms(p.rooms); setRoom(p.rooms[0] ?? "room"); }).catch(() => {});
-    api.getHealth().then((h) => setMock(h.mock)).catch(() => {});
+    api.getHealth().then((h) => { setMock(h.mock); setSttMode(h.stt ?? "browser"); }).catch(() => {});
   }, []);
 
   // Memory loop: ~1 frame/second to /api/observe while not guiding.
@@ -181,11 +185,45 @@ export default function Phone() {
   }
   useEffect(() => () => stopOrientation(), []);
 
+  // Server-side STT: the rest of the pipeline (chat, guidance) is identical to browser STT.
+  async function finishRecording(recording) {
+    try {
+      const rec = await recording;
+      const wav = rec && (await rec.stop());
+      setListening(false);
+      if (!wav) {
+        setStatus("Hold the button while you speak.");
+        return speak("Hold the button while you speak.", { force: true });
+      }
+      setStatus("Thinking…");
+      const { text } = await api.transcribe(wav);
+      if (!text) {
+        setStatus("I didn't hear anything. Try again.");
+        return speak("I didn't hear anything. Try again.", { force: true });
+      }
+      await runCommand(text);
+    } catch {
+      setListening(false);
+      // Speech service down or microphone blocked: use the browser's recognition if it exists.
+      const msg = recognitionSupported()
+        ? "Speech service unavailable. Switched to built-in listening. Try again."
+        : "Speech service unavailable. Type your request instead.";
+      if (recognitionSupported()) setSttMode("browser");
+      setStatus(msg);
+      speak(msg, { force: true });
+    }
+  }
+
   function startTalk() {
     if (listening) return;
     unlock();
     setListening(true);
     setStatus("Listening…");
+    if (sttMode === "elevenlabs") {
+      recorderRef.current = startRecording();
+      recorderRef.current.catch(() => {}); // the failure is reported when the button is released
+      return;
+    }
     stopListenRef.current = listen({
       onResult: runCommand,
       onEnd: () => setListening(false),
@@ -194,6 +232,12 @@ export default function Phone() {
     if (!stopListenRef.current) setListening(false);
   }
   function endTalk() {
+    if (recorderRef.current) {
+      const recording = recorderRef.current;
+      recorderRef.current = null;
+      finishRecording(recording);
+      return;
+    }
     stopListenRef.current?.();
     stopListenRef.current = null;
   }
@@ -206,7 +250,7 @@ export default function Phone() {
   }
 
   const [typed, setTyped] = useState("");
-  const canListen = recognitionSupported();
+  const canListen = recognitionSupported() || sttMode === "elevenlabs";
 
   return (
     <main className="phone">

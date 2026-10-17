@@ -69,3 +69,16 @@ Everything above is verbatim from the project brief. The items below are what th
 - `/api/chat` does not publish a separate `say` event (the `chat` event is the log entry). Chat text lives only in memory and the live event; nothing is written to the database.
 - Config (see `.env.example`): `LLM_PROVIDER=mock|purple|gemini|openai_compat`; `PURPLE_API_BASE`, `PURPLE_API_TOKEN`, `PURPLE_MODEL`; `GEMINI_API_KEY`, `GEMINI_BASE_URL` (blank = Google's documented OpenAI-compatible endpoint), `GEMINI_MODEL`; `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`; optional `LLM_TIMEOUT_S` (default 3).
 - The phone calls `/api/chat` first and falls back to its fixed-phrase matching if the request fails.
+
+---
+
+# Speech-to-text (added)
+
+  POST /api/transcribe   multipart: audio (16 kHz mono WAV, up to 5 MB)
+      -> { text, provider }            text may be "" for silence
+  GET  /api/health       -> { ok, mode, mock, stt }     stt = "elevenlabs" | "browser"
+
+- `STT_PROVIDER=browser` (default): `/api/transcribe` answers **503** and the phone uses the browser's built-in SpeechRecognition. `STT_PROVIDER=elevenlabs` with `ELEVENLABS_API_KEY` set: `health.stt` is `"elevenlabs"`, and the phone records a WAV while the button is held, uploads it, then sends the text to `/api/chat` exactly as browser STT would.
+- Errors: **400** empty recording, **413** over 5 MB, **502** the provider failed (auth, quota, 429, timeout, bad response; no provider detail is returned). On any failure the phone says so and switches to browser recognition when the browser has it.
+- Relay: `POST {ELEVENLABS_BASE_URL or https://api.elevenlabs.io/v1}/speech-to-text`, header `xi-api-key`, form fields `model_id` (`ELEVENLABS_STT_MODEL`, blank = `scribe_v2`), `tag_audio_events=false`, `diarize=false`, and `file`. No automatic retries (avoids double charges). Timeout `STT_TIMEOUT_S` (default 10).
+- **Privacy:** audio is held in memory only, sent only to ElevenLabs, never written to disk, never logged, and not forwarded to the LLM (only the transcript is). The transcript is handled like any chat text.
