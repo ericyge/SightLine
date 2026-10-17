@@ -9,7 +9,8 @@ os.environ["LLM_PROVIDER"] = "mock"   # a teammate's .env must never make tests 
 
 
 PROVIDER_VARS = ["PURPLE_API_BASE", "PURPLE_API_TOKEN", "PURPLE_MODEL", "LLM_BASE_URL", "LLM_API_KEY",
-                 "LLM_MODEL", "GEMINI_API_KEY", "GEMINI_BASE_URL", "GEMINI_MODEL", "LLM_TIMEOUT_S"]
+                 "LLM_MODEL", "GEMINI_API_KEY", "GEMINI_BASE_URL", "GEMINI_MODEL", "LLM_TIMEOUT_S", "ELEVENLABS_API_KEY",
+                 "ELEVENLABS_STT_MODEL", "ELEVENLABS_BASE_URL", "STT_TIMEOUT_S"]
 
 
 @pytest.fixture(autouse=True)
@@ -18,6 +19,7 @@ def _no_provider_env(monkeypatch):
     for name in PROVIDER_VARS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LLM_PROVIDER", "mock")
+    monkeypatch.setenv("STT_PROVIDER", "browser")
 
 
 @pytest.fixture()

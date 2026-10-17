@@ -17,15 +17,16 @@ from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 
-from . import db, guidance, llm  # noqa: E402
+from . import db, guidance, llm, stt  # noqa: E402
 from .events import broadcaster  # noqa: E402
 from .models import (ChatRequest, ChatResponse, GuideResponse, HealthResponse, ObserveResponse, OkResponse, Profile,  # noqa: E402
-                     WhereLast, WhereResponse)
+                     TranscribeResponse, WhereLast, WhereResponse)
 from .vision import get_vision  # noqa: E402
 
 log = logging.getLogger("sightline")
 MAX_EVENT_FRAME_BYTES = 200_000   # frames are only forwarded live to the dashboard, never stored
 GUIDE_STATE_TTL_S = 10.0          # a pause this long starts a fresh guidance session
+MAX_AUDIO_BYTES = 5_000_000       # 16 kHz mono WAV is ~32 KB/s, so this is over 2 minutes
 CHAT_HISTORY_TURNS = 6
 MAX_CHAT_SAY_CHARS = 200
 
@@ -111,7 +112,8 @@ def _event(type_: str, **payload) -> dict:
 def health():
     """Mode check so the UI can show a MOCK badge."""
     v = get_vision()
-    return HealthResponse(mode=v.mode, mock=v.mock)
+    client = stt.get_stt()
+    return HealthResponse(mode=v.mode, mock=v.mock, stt=client.provider if client else "browser")
 
 
 @app.get("/api/profile", response_model=Profile)
@@ -244,6 +246,25 @@ async def chat(req: ChatRequest):
     broadcaster.publish(_event("chat", user_text=req.text, intent=resp.intent, item=resp.item,
                                say=resp.say, provider=provider))
     return resp
+
+
+@app.post("/api/transcribe", response_model=TranscribeResponse)
+async def transcribe(audio: UploadFile = File(...)):
+    """Speech-to-text for a short recording. 503 when STT_PROVIDER is not elevenlabs."""
+    client = stt.get_stt()
+    if client is None:
+        raise HTTPException(503, "Speech-to-text is not configured; use browser recognition")
+    data = await audio.read(MAX_AUDIO_BYTES + 1)   # held in memory only, never stored or logged
+    if not data:
+        raise HTTPException(400, "Empty recording")
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(413, "Recording too long")
+    try:
+        text = await run_in_threadpool(client.transcribe, data, audio.content_type or "audio/wav")
+    except stt.STTError as e:
+        log.warning("STT %s failed (%s)", client.provider, e)
+        raise HTTPException(502, "Speech-to-text failed") from None
+    return TranscribeResponse(text=text, provider=client.provider)
 
 
 @app.websocket("/ws/events")

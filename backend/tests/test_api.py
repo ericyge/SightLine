@@ -6,7 +6,7 @@ def frame(jpeg):
 
 
 def test_health_reports_mock(client):
-    assert client.get("/api/health").json() == {"ok": True, "mode": "mock", "mock": True}
+    assert client.get("/api/health").json() == {"ok": True, "mode": "mock", "mock": True, "stt": "browser"}
 
 
 def test_profile_default_and_roundtrip(client):

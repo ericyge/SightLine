@@ -85,6 +85,12 @@ class HealthResponse(BaseModel):
     ok: bool = True
     mode: str
     mock: bool
+    stt: str = "browser"   # "elevenlabs": phone should upload audio; "browser": use SpeechRecognition
+
+
+class TranscribeResponse(BaseModel):
+    text: str              # may be empty (silence)
+    provider: str
 
 
 class ChatTurn(BaseModel):

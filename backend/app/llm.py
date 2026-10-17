@@ -19,13 +19,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-try:  # Use the OS certificate store: antivirus/VPN/corporate proxies re-sign HTTPS on many laptops
-    import ssl
-
-    import truststore
-    _VERIFY: "ssl.SSLContext | bool" = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-except ImportError:  # falls back to httpx's default certificate bundle
-    _VERIFY = True
+from .net import VERIFY as _VERIFY
 
 log = logging.getLogger("sightline.llm")
 
