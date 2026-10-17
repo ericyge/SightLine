@@ -1,0 +1,8 @@
+{
+  "request_id": "local-audio-example",
+  "steps": [
+    {"text": "Your wallet is on the desk."},
+    {"text": "The wallet is slightly to your right."},
+    {"text": "It is next to the lamp."}
+  ]
+}
