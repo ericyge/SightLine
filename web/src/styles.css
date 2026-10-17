@@ -46,6 +46,7 @@ a { color: var(--accent); font-size: 1.5rem; }
 .dash header { grid-area: head; display: flex; align-items: center; gap: 1.2rem; }
 .dash h1 { margin: 0; font-size: 2.6rem; }
 .dash h2 { margin: 0 0 0.6rem; font-size: 1.7rem; color: var(--accent); }
+.latency { font-size: 1.2rem; color: var(--muted); }
 .conn { margin-left: auto; font-weight: 800; }
 .conn.ok { color: var(--ok); }
 .conn.bad { color: var(--bad); }

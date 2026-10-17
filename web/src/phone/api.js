@@ -2,6 +2,7 @@
 
 async function json(res) {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (res.status === 204) return null; // /api/observe and /api/guide drop a frame when Perceptron is busy
   return res.json();
 }
 

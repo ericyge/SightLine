@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --test src/phone/recorder.test.js",
+    "test": "node --test src/phone/recorder.test.js src/phone/pacing.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

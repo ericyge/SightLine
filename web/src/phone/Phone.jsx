@@ -3,6 +3,7 @@ import * as api from "./api.js";
 import { createBeeper, panFromAngle, pitchBoost, unlockAudio } from "./audio.js";
 import { listen, parseCommand, recognitionSupported, speak, unlockSpeech } from "./speech.js";
 import { startRecording } from "./recorder.js";
+import { guideIntervalMs, waitMs } from "./pacing.js";
 import {
   compensate, getYaw, requestOrientationPermission, startOrientation, stopOrientation,
 } from "./orientation.js";
@@ -60,6 +61,7 @@ export default function Phone() {
   const [mock, setMock] = useState(false);
   // "elevenlabs": record audio and send it to /api/transcribe. "browser": built-in SpeechRecognition.
   const [sttMode, setSttMode] = useState("browser");
+  const guideMsRef = useRef(guideIntervalMs()); // min ms between /api/guide requests (backend GUIDE_MAX_FPS)
   const recorderRef = useRef(null); // promise of the active recording while the button is held
   const roomRef = useRef(room);
   const guideRef = useRef({ last: null, yawAtLast: null, at: 0 });
@@ -69,7 +71,11 @@ export default function Phone() {
 
   useEffect(() => {
     api.getProfile().then((p) => { setRooms(p.rooms); setRoom(p.rooms[0] ?? "room"); }).catch(() => {});
-    api.getHealth().then((h) => { setMock(h.mock); setSttMode(h.stt ?? "browser"); }).catch(() => {});
+    api.getHealth().then((h) => {
+      setMock(h.mock);
+      setSttMode(h.stt ?? "browser");
+      guideMsRef.current = guideIntervalMs(h.guide_max_fps);
+    }).catch(() => {});
   }, []);
 
   // Memory loop: ~1 frame/second to /api/observe while not guiding.
@@ -90,7 +96,8 @@ export default function Phone() {
     return () => { cancelled = true; };
   }, [ready, guiding]);
 
-  // Guidance loop: ~1 frame/second to /api/guide, plus a fast local loop updating the beeps.
+  // Guidance loop: as fast as the backend answers, capped (GUIDE_MAX_FPS), one request in flight and
+  // never queued; plus a fast local loop that keeps the beeps panned between answers.
   useEffect(() => {
     if (!guiding) return;
     let cancelled = false;
@@ -113,12 +120,15 @@ export default function Phone() {
           const yaw = getYaw();
           const r = await api.guide(await captureFrame(videoRef.current), guiding, yaw ?? undefined);
           if (cancelled) break;
-          guideRef.current = { last: r, yawAtLast: yaw, at: performance.now() };
-          if (r.say) { speak(r.say, { interrupt: true }); setCue(r.say); }
+          // null = 204: the backend dropped this frame (still busy). Keep the last result.
+          if (r) {
+            guideRef.current = { last: r, yawAtLast: yaw, at: performance.now() };
+            if (r.say) { speak(r.say, { interrupt: true }); setCue(r.say); }
+          }
         } catch {
           setStatus("Connection problem. Still trying.");
         }
-        await sleep(Math.max(0, LOOP_MS - (performance.now() - t0)));
+        await sleep(waitMs(guideMsRef.current, performance.now() - t0));
       }
     })();
     return () => {

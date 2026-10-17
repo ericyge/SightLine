@@ -75,6 +75,7 @@ export default function Dashboard() {
   const [timeline, setTimeline] = useState([]);
   const [log, setLog] = useState([]);
   const [mock, setMock] = useState(null);
+  const [vision, setVision] = useState(null); // live Perceptron latency from /api/health
   const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
@@ -105,8 +106,13 @@ export default function Dashboard() {
     }
   });
 
+  // Mode badge and live Perceptron latency (p50/p95), refreshed every few seconds.
   useEffect(() => {
-    fetch("/api/health").then((r) => r.json()).then((h) => setMock(h.mock)).catch(() => {});
+    const load = () => fetch("/api/health").then((r) => r.json())
+      .then((h) => { setMock(h.mock); setVision(h.vision ?? null); }).catch(() => {});
+    load();
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
   }, []);
 
   return (
@@ -114,6 +120,12 @@ export default function Dashboard() {
       <header>
         <h1>Sightline</h1>
         {mock && <span className="mock-badge">MOCK MODE: fake detections</span>}
+        {vision && (
+          <span className="latency" aria-label="Perceptron latency">
+            Perceptron p50 {vision.p50_ms ?? "–"} ms · p95 {vision.p95_ms ?? "–"} ms ·
+            {" "}{vision.calls} ok · {vision.errors} errors · {vision.dropped} dropped
+          </span>
+        )}
         <span className={`conn ${connected ? "ok" : "bad"}`}>{connected ? "Live" : "Reconnecting…"}</span>
       </header>
       <section className="col-main" aria-label="Live view">
