@@ -186,8 +186,8 @@ class PerceptronVision(VisionClient):
     flight raises VisionBusy and is dropped (no queue). Errors, timeouts and 429s return [].
 
     Confirmed from the SDK source (perceptron 0.4.0): image() takes raw bytes; detect() sets
-    expects="box" itself (passing it again raises TypeError); there is no per-call timeout in the
-    high-level helpers, so the timeout is the global `configure(timeout=...)`.
+    expects="box" itself (so passing expects="box" is accepted but redundant); there is no per-call
+    timeout in the high-level helpers, so the timeout is the global `configure(timeout=...)`.
     NOT verified: latency, and whether your key can use the chosen model.
     TODO(A): spot text ("on the desk, next to the lamp") needs a second call; it is "" for now.
     TODO(A): in-context example photos per item (detect(examples=...)).
