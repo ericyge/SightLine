@@ -9,6 +9,7 @@ from app import llm
 
 USER = lambda text: [{"role": "system", "content": "sys"}, {"role": "user", "content": text}]  # noqa: E731
 SECRET = "sk-test-SECRET-123"
+GEMINI_SECRET = "gm-test-SECRET-456"
 
 
 def tool_reply(name, args, as_string=True, key="tool_calls"):
@@ -30,6 +31,12 @@ def compat_env(monkeypatch):
     monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1/")
     monkeypatch.setenv("LLM_API_KEY", SECRET)
     monkeypatch.setenv("LLM_MODEL", "some-model")
+
+
+@pytest.fixture()
+def gemini_env(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", GEMINI_SECRET)
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-example-flash")
 
 
 @pytest.fixture()
@@ -164,7 +171,8 @@ def test_list_models(purple_env):
 
 def test_get_llm_selection(monkeypatch):
     for value, cls in (("mock", llm.KeywordLLM), ("purple", llm.PurpleLLM),
-                       ("openai_compat", llm.OpenAICompatLLM), ("bogus", llm.KeywordLLM)):
+                       ("gemini", llm.GeminiLLM), ("openai_compat", llm.OpenAICompatLLM),
+                       ("bogus", llm.KeywordLLM)):
         monkeypatch.setenv("LLM_PROVIDER", value)
         assert isinstance(llm.get_llm(), cls)
     monkeypatch.delenv("LLM_PROVIDER")

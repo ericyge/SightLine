@@ -8,6 +8,18 @@ os.environ["PERCEPTRON_MODE"] = "mock"
 os.environ["LLM_PROVIDER"] = "mock"   # a teammate's .env must never make tests hit the network
 
 
+PROVIDER_VARS = ["PURPLE_API_BASE", "PURPLE_API_TOKEN", "PURPLE_MODEL", "LLM_BASE_URL", "LLM_API_KEY",
+                 "LLM_MODEL", "GEMINI_API_KEY", "GEMINI_BASE_URL", "GEMINI_MODEL", "LLM_TIMEOUT_S"]
+
+
+@pytest.fixture(autouse=True)
+def _no_provider_env(monkeypatch):
+    """A developer's real .env (loaded when app.main is imported) must never reach tests."""
+    for name in PROVIDER_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     """TestClient in mock mode with a fresh temp DB and thumbs dir."""

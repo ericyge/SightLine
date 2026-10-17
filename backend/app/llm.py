@@ -1,8 +1,14 @@
 """Swappable LLM client for the conversational layer (POST /api/chat).
 
-Providers (env LLM_PROVIDER): mock (default, KeywordLLM, no network) | purple | openai_compat.
-On any error or timeout, chat_with_fallback() answers with KeywordLLM and reports
-provider="keyword_fallback". Never log tokens, request bodies or model replies.
+Providers (env LLM_PROVIDER): mock (default, KeywordLLM, no network) | purple | gemini | openai_compat.
+Preference order is purple -> gemini -> keyword: the chain starts at the selected provider and
+falls through the later ones on any error, timeout or missing key, always ending at KeywordLLM.
+The `provider` reported is whichever one answered ("keyword_fallback" if the chain ran out).
+
+Privacy for every external provider: only the user's transcribed text, the last 6 turns, and
+watchlist names/aliases/room names are sent (see build_system_prompt and the /api/chat route).
+Never frames, thumbnails or sighting history. Never log tokens, Authorization headers, request
+bodies or model replies.
 """
 import json
 import logging
@@ -17,10 +23,18 @@ log = logging.getLogger("sightline.llm")
 
 DEFAULT_PURPLE_BASE = "https://purple.uw.edu/api/external/v1"
 DEFAULT_TIMEOUT_S = 3.0
+# From Google's "OpenAI compatibility" page (ai.google.dev/gemini-api/docs/openai). GEMINI_BASE_URL
+# overrides it in case Google moves the endpoint.
+DEFAULT_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
+PROVIDER_ORDER = ["purple", "gemini"]   # preference order; keyword is always the last resort
 
 
 class LLMError(Exception):
     """Any failure talking to a model (config, network, HTTP status, bad response shape)."""
+
+
+class LLMNotConfigured(LLMError):
+    """A provider's env settings are missing; the chain skips it quietly."""
 
 
 @dataclass
@@ -159,7 +173,7 @@ class _HTTPChatLLM(LLMClient):
 
     def _request(self, method: str, url: str, key: str, body: dict | None = None) -> dict:
         """One HTTP call; every failure becomes LLMError without leaking the token or body."""
-        timeout = float(os.getenv("LLM_TIMEOUT_S", DEFAULT_TIMEOUT_S))
+        timeout = float(os.getenv("LLM_TIMEOUT_S") or DEFAULT_TIMEOUT_S)
         try:
             with httpx.Client(timeout=timeout, transport=self._transport) as c:
                 r = c.request(method, url, headers={"Authorization": f"Bearer {key}"}, json=body)
@@ -203,12 +217,12 @@ class PurpleLLM(_HTTPChatLLM):
     FIELD_NAMES: dict[str, str] = {}
 
     def _settings(self) -> tuple[str, str, str]:
-        base = os.getenv("PURPLE_API_BASE", DEFAULT_PURPLE_BASE).rstrip("/")
+        base = (os.getenv("PURPLE_API_BASE") or DEFAULT_PURPLE_BASE).rstrip("/")  # blank = default
         token, model = os.getenv("PURPLE_API_TOKEN", ""), os.getenv("PURPLE_MODEL", "")
         if not token:
-            raise LLMError("PURPLE_API_TOKEN not set")
+            raise LLMNotConfigured("PURPLE_API_TOKEN not set")
         if not model:
-            raise LLMError("PURPLE_MODEL not set")
+            raise LLMNotConfigured("PURPLE_MODEL not set")
         return base, token, model
 
     def _fields(self, body: dict) -> dict:
@@ -223,34 +237,68 @@ class OpenAICompatLLM(_HTTPChatLLM):
         base, key, model = (os.getenv("LLM_BASE_URL", "").rstrip("/"), os.getenv("LLM_API_KEY", ""),
                             os.getenv("LLM_MODEL", ""))
         if not (base and key and model):
-            raise LLMError("LLM_BASE_URL, LLM_API_KEY and LLM_MODEL must all be set")
+            raise LLMNotConfigured("LLM_BASE_URL, LLM_API_KEY and LLM_MODEL must all be set")
+        return base, key, model
+
+
+class GeminiLLM(OpenAICompatLLM):
+    """Google Gemini through its OpenAI-compatible endpoint (same tool-calling code path).
+
+    Per Google's docs: POST {base}/chat/completions with Authorization: Bearer <GEMINI_API_KEY>,
+    tools as {"type": "function", ...}. GEMINI_MODEL has no default because model names change
+    (see .env.example). UNVERIFIED: Google's page does not show the tool_calls response shape or
+    say whether `arguments` is a JSON string; parse_chat_response handles string and dict.
+    """
+    provider = "gemini"
+
+    def _settings(self) -> tuple[str, str, str]:
+        base = (os.getenv("GEMINI_BASE_URL") or DEFAULT_GEMINI_BASE).rstrip("/")  # blank = default
+        key, model = os.getenv("GEMINI_API_KEY", ""), os.getenv("GEMINI_MODEL", "")
+        if not key:
+            raise LLMNotConfigured("GEMINI_API_KEY not set")
+        if not model:
+            raise LLMNotConfigured("GEMINI_MODEL not set")
         return base, key, model
 
 
 # ---- selection + fallback ----------------------------------------------------------------
 
+def _make(name: str) -> LLMClient:
+    """Build the client for a provider name."""
+    return {"purple": PurpleLLM, "gemini": GeminiLLM, "openai_compat": OpenAICompatLLM}[name]()
+
+
 def get_llm() -> LLMClient:
     """Client chosen by LLM_PROVIDER (default mock)."""
     provider = os.getenv("LLM_PROVIDER", "mock").lower()
-    if provider == "purple":
-        return PurpleLLM()
-    if provider == "openai_compat":
-        return OpenAICompatLLM()
+    if provider in ("purple", "gemini", "openai_compat"):
+        return _make(provider)
     if provider != "mock":
         log.warning("Unknown LLM_PROVIDER %r; using keyword matching", provider)
     return KeywordLLM("mock")
 
 
+def get_chain() -> list[LLMClient]:
+    """The selected provider followed by the later ones in PROVIDER_ORDER (purple -> gemini)."""
+    first = get_llm()
+    later = []
+    if first.provider in PROVIDER_ORDER:
+        later = [_make(n) for n in PROVIDER_ORDER[PROVIDER_ORDER.index(first.provider) + 1:]]
+    return [first, *later]
+
+
 def chat_with_fallback(messages: list[dict], tools: list[dict] | None = None) -> tuple[LLMResult, str]:
-    """Run the configured client; on any failure answer with KeywordLLM. Returns (result, provider)."""
+    """Try each provider in the chain, then KeywordLLM. Returns (result, provider that answered)."""
     tools = TOOLS if tools is None else tools
-    client = get_llm()
-    try:
-        return client.chat(messages, tools), client.provider
-    except Exception as e:  # noqa: BLE001 - the demo must never break on an LLM problem
-        log.warning("LLM %s failed (%s); using keyword fallback", client.provider,
-                    e if isinstance(e, LLMError) else type(e).__name__)
-        return KeywordLLM("keyword_fallback").chat(messages, tools), "keyword_fallback"
+    for client in get_chain():
+        try:
+            return client.chat(messages, tools), client.provider
+        except LLMNotConfigured as e:
+            log.info("LLM %s skipped (%s)", client.provider, e)
+        except Exception as e:  # noqa: BLE001 - the demo must never break on an LLM problem
+            log.warning("LLM %s failed (%s); trying next", client.provider,
+                        e if isinstance(e, LLMError) else type(e).__name__)
+    return KeywordLLM("keyword_fallback").chat(messages, tools), "keyword_fallback"
 
 
 def _main() -> None:
@@ -262,7 +310,7 @@ def _main() -> None:
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     client = get_llm()
     if len(sys.argv) < 2 or sys.argv[1] != "models" or not isinstance(client, _HTTPChatLLM):
-        sys.exit("usage: python -m app.llm models   (needs LLM_PROVIDER=purple or openai_compat)")
+        sys.exit("usage: python -m app.llm models   (needs LLM_PROVIDER=purple, gemini or openai_compat)")
     try:
         print("\n".join(client.list_models()))
     except LLMError as e:
