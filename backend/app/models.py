@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from .memory.models import Place
+
 GuidanceStyle = Literal["clock_face", "left_right", "beeps_only"]
 Distance = Literal["far", "near", "reach"]
 
@@ -21,13 +23,23 @@ class Room(BaseModel):
 
 class Sighting(BaseModel):
     """One saved sighting. box is [x1, y1, x2, y2] normalized 0..1."""
+    id: int
     item: str
     room: str
     spot: str
     box: list[float]
-    confidence: float
+    confidence: float | None
     ts: str
     thumb: str
+    place_id: str | None = None
+    place_source: Literal["none", "manual", "automatic"] = "none"
+    place_reason: str = ""
+
+
+class RememberedItem(BaseModel):
+    item: str
+    last: Sighting | None = None
+    destination: Place | None = None
 
 
 class ObserveResponse(BaseModel):
@@ -39,7 +51,7 @@ class WhereLast(BaseModel):
     spot: str
     minutes_ago: float
     thumb: str
-    confidence: float
+    confidence: float | None
 
 
 class WhereResponse(BaseModel):
@@ -48,11 +60,20 @@ class WhereResponse(BaseModel):
     found: bool = True
     last: WhereLast | None = None
     history: list[Sighting] = Field(default_factory=list)
+    destination: Place | None = None
     say: str
 
 
+GuideMode = Literal["visual", "navigate", "lost"]
+
+
 class GuideResponse(BaseModel):
-    """When found=False, geometry fields are null and beep_ms is 0 (silence)."""
+    """When found=False, geometry fields are null and beep_ms is 0 (silence).
+
+    mode visual: item in frame (existing beep/clock guidance).
+    mode navigate: room-to-room cue toward the newest sighting's destination.
+    mode lost: cannot see the item and cannot offer a route cue.
+    """
     found: bool
     point: list[float] | None = None
     box: list[float] | None = None
@@ -62,6 +83,10 @@ class GuideResponse(BaseModel):
     pan: float = 0.0
     say: str = ""
     beep_ms: int = 0
+    mode: GuideMode = "visual"
+    current_place: str | None = None
+    destination: Place | None = None
+    next_instruction: str | None = None
 
 
 class WatchItem(BaseModel):

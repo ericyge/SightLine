@@ -1,0 +1,41 @@
+{
+  "places": [
+    {
+      "id": "bedroom_door",
+      "name": "bedroom doorway",
+      "room": "bedroom",
+      "description": "Doorway between the bedroom and the hallway.",
+      "landmarks": ["bedroom door frame", "hallway beyond the door"]
+    },
+    {
+      "id": "kitchen_entry",
+      "name": "kitchen entrance",
+      "room": "kitchen",
+      "description": "Entrance from the hallway into the kitchen.",
+      "landmarks": ["refrigerator beside the entrance", "sink beyond the entrance"]
+    },
+    {
+      "id": "kitchen_counter",
+      "name": "counter beside the sink",
+      "room": "kitchen",
+      "description": "The section of countertop immediately beside the sink.",
+      "landmarks": ["sink", "faucet", "counter edge"]
+    }
+  ],
+  "connections": [
+    {
+      "from_place_id": "bedroom_door",
+      "to_place_id": "kitchen_entry",
+      "departure_view": "At the bedroom doorway facing out into the hallway.",
+      "instruction": "Follow the hallway toward the kitchen entrance.",
+      "arrival_view": "At the kitchen entrance facing into the kitchen."
+    },
+    {
+      "from_place_id": "kitchen_entry",
+      "to_place_id": "kitchen_counter",
+      "departure_view": "At the kitchen entrance facing the sink.",
+      "instruction": "Approach the counter beside the sink.",
+      "arrival_view": "Facing the sink and the adjacent countertop."
+    }
+  ]
+}
