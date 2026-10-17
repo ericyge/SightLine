@@ -19,6 +19,14 @@ from dataclasses import dataclass, field
 
 import httpx
 
+try:  # Use the OS certificate store: antivirus/VPN/corporate proxies re-sign HTTPS on many laptops
+    import ssl
+
+    import truststore
+    _VERIFY: "ssl.SSLContext | bool" = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+except ImportError:  # falls back to httpx's default certificate bundle
+    _VERIFY = True
+
 log = logging.getLogger("sightline.llm")
 
 DEFAULT_PURPLE_BASE = "https://purple.uw.edu/api/external/v1"
@@ -175,7 +183,7 @@ class _HTTPChatLLM(LLMClient):
         """One HTTP call; every failure becomes LLMError without leaking the token or body."""
         timeout = float(os.getenv("LLM_TIMEOUT_S") or DEFAULT_TIMEOUT_S)
         try:
-            with httpx.Client(timeout=timeout, transport=self._transport) as c:
+            with httpx.Client(timeout=timeout, transport=self._transport, verify=_VERIFY) as c:
                 r = c.request(method, url, headers={"Authorization": f"Bearer {key}"}, json=body)
             r.raise_for_status()
             return r.json()
