@@ -1,0 +1,5 @@
+{ "watchlist": [
+    {"name":"wallet","description":"red leather wallet","home_spot":"bedroom desk"},
+    {"name":"keys","description":"keys on a bright keychain","home_spot":"kitchen counter"} ],
+  "rooms": ["bedroom","kitchen"],
+  "guidance_style": "clock_face" }
