@@ -80,6 +80,7 @@ ngrok http 5173
 Open `https://<your-subdomain>.ngrok-free.app/phone` on the phone. On iPhone, the first press of "Hold to talk" asks for motion-sensor permission. Do not tunnel port 8000.
 
 ### Real Perceptron (optional, role A)
+<<<<<<< HEAD
 
 Copy `.env.example` to `.env`, set `PERCEPTRON_API_KEY` and `PERCEPTRON_MODE=perceptron`, and `pip install "perceptron>=0.4.0"`. The real client is not implemented yet (`TODO(A)` in `backend/app/vision.py`). The frontend never calls Perceptron; the backend owns the key. Never commit `.env`.
 
@@ -95,5 +96,21 @@ Copy `.env.example` to `.env`, set `PERCEPTRON_API_KEY` and `PERCEPTRON_MODE=per
 | `docs/PROJECT_OVERVIEW.md` | Problem, architecture, team, tracks, status                                                                                       |
 | `docs/CONTRACT.md`         | API contract + how the scaffold resolves open details                                                                             |
 | `docs/ROLES.md`            | Who owns what, TODO checklists, checkpoints                                                                                       |
+=======
+Copy `.env.example` to `.env`, set `PERCEPTRON_API_KEY` and `PERCEPTRON_MODE=perceptron`, and restart the backend. The client in `backend/app/vision/vision.py` is implemented and tested offline against the installed SDK. Live accuracy and latency still need an API key. The frontend never calls Perceptron; the backend owns the key. Never commit `.env`.
+
+See [the vision guide](docs/VISION.md) for recorded-video ingestion, latency benchmarks, personal item reference photos, and macOS setup. All commands also support mock mode without a key.
+
+## Layout
+| Path | What |
+|---|---|
+| `backend/app/` | FastAPI app: `main.py` routes, `guidance.py` pure math, `vision/` client and video tools, `frames.py`, `db.py`, `events.py`, `models.py` |
+| `web/src/phone/` | Phone UI, beep engine, speech, gyroscope, API wrappers |
+| `web/src/dashboard/` | Judge-facing live dashboard |
+| `purple/` | Purple agent text files (instructions, knowledge, sample profile) |
+| `docs/PROJECT_OVERVIEW.md` | Problem, architecture, team, tracks, status |
+| `docs/CONTRACT.md` | API contract + how the scaffold resolves open details |
+| `docs/ROLES.md` | Who owns what, TODO checklists, checkpoints |
+>>>>>>> bcdbc51 (Initial testing of Perceptron VLM success)
 
 Read `docs/ROLES.md` next, then search for your `TODO(A|B|C|D)`.

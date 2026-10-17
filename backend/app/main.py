@@ -15,13 +15,14 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 from fastapi import FastAPI, HTTPException, File, Form, Request, UploadFile, WebSocket, WebSocketDisconnect  # noqa: E402
 from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import FileResponse  # noqa: E402
+from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
 
 from . import db, guidance  # noqa: E402
 from .events import broadcaster  # noqa: E402
 from .models import (GuideResponse, HealthResponse, ObserveResponse, OkResponse, Profile,  # noqa: E402
                      WhereLast, WhereResponse)
-from .vision import get_vision  # noqa: E402
+from .vision import VisionUnavailable, get_vision, reset_vision  # noqa: E402
+from .frames import InvalidFrame, MAX_FRAME_BYTES, prepare_frame  # noqa: E402
 
 log = logging.getLogger("sightline")
 MAX_EVENT_FRAME_BYTES = 200_000   # frames are only forwarded live to the dashboard, never stored
@@ -37,11 +38,32 @@ async def lifespan(app: FastAPI):
     log.warning("Sightline backend up. vision mode = %s%s", vision.mode,
                 " (MOCK: fake detections, no API key needed)" if vision.mock else "")
     db.thumbs_dir().mkdir(parents=True, exist_ok=True)
-    yield
+    try:
+        yield
+    finally:
+        reset_vision()
 
 
 app = FastAPI(title="Sightline", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@app.exception_handler(VisionUnavailable)
+async def vision_error(request: Request, exc: VisionUnavailable):
+    """Do not mistake an unavailable model for a missing item."""
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+async def read_frame(upload: UploadFile) -> bytes:
+    """Bound uploads and keep inference, thumbnail, and dashboard geometry aligned."""
+    data = await upload.read(MAX_FRAME_BYTES + 1)
+    if len(data) > MAX_FRAME_BYTES:
+        raise HTTPException(413, "Frame exceeds 8 MiB.")
+    try:
+        return await run_in_threadpool(prepare_frame, data,
+                                      int(os.getenv("VISION_FRAME_MAX_PX", "640")))
+    except InvalidFrame as exc:
+        raise HTTPException(422, str(exc)) from None
 
 
 # ---- helpers ----------------------------------------------------------------------------
@@ -127,8 +149,11 @@ def post_profile(profile: Profile):
 async def observe(request: Request, frame: UploadFile = File(...), room: str = Form(...),
                   ts: str | None = Form(None)):
     """Find watched items in a frame and save each sighting (frame is discarded)."""
-    data = await frame.read()
-    when = _parse_ts(ts).isoformat() if ts else _now_iso()
+    data = await read_frame(frame)
+    try:
+        when = _parse_ts(ts).astimezone(timezone.utc).isoformat() if ts else _now_iso()
+    except ValueError:
+        raise HTTPException(422, "ts must be an ISO timestamp.") from None
     # TODO(A): skip saving when an item hasn't moved since its last sighting (dedupe / throttle).
     detections = await run_in_threadpool(
         get_vision().detect, data, db.list_items(), room, _mock_hints(request))
@@ -163,7 +188,7 @@ async def where(item: str):
 async def guide(request: Request, frame: UploadFile = File(...), item: str = Form(...),
                 yaw_deg: float | None = Form(None)):
     """One guidance step: locate the item in this frame and return pan/clock/beep info."""
-    data = await frame.read()
+    data = await read_frame(frame)
     name = db.resolve_item(item)
     if name is None:
         return GuideResponse(found=False, say=f"I'm not watching for {item.strip().lower()}.")

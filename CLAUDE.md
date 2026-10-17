@@ -17,7 +17,7 @@ Tracks: Community Kitchen (main), Perceptron (our vision API), nebulaONE (a Purp
 
 ## Rules
 - `docs/CONTRACT.md` is the API contract. Keep field names EXACTLY; update the doc when behavior changes.
-- ALL Perceptron calls live in one class in `backend/app/vision.py`. Default is `MockVision` (`PERCEPTRON_MODE=mock`); the repo must always run with no keys. Do not guess SDK signatures: verify against the PyPI page/docs or leave a TODO.
+- ALL Perceptron calls live in one class in `backend/app/vision/vision.py`. Default is `MockVision` (`PERCEPTRON_MODE=mock`); the repo must always run with no keys. Do not guess SDK signatures: verify against the PyPI page/docs or leave a TODO.
 - `backend/app/guidance.py` stays pure (no I/O, no clock reads); every function has tests in `backend/tests/test_guidance.py`.
 - The frontend never calls Perceptron. Never commit `.env` or keys. Never log frames or full keys. Frames are never written to disk (only thumbnail crops).
 - Accessibility on the phone page: large touch targets, ARIA labels, aria-live status, nothing visual-only.

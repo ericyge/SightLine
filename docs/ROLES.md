@@ -3,19 +3,35 @@
 Four owners, one file area each, so merges stay quiet. Search the code for `TODO(A)` .. `TODO(D)` to find where to start. The repo runs in mock mode with no keys; build on that.
 
 ## A: Vision and Memory
-**Owns:** `backend/app/vision.py`, `backend/app/db.py`, `/api/observe`, `/api/where`.
+**Owns:** `backend/app/vision/`, `backend/app/frames.py`, `backend/app/db.py`, `/api/observe`, `/api/where`.
 Real Perceptron client, prompts + JSON schemas, in-context photos of each item, room tagging.
 
-**FIRST TASK:** measure Perceptron median latency on 20 real 640px phone frames for `perceptron-mk1.5` and `isaac-0.3-fast`, and post the numbers in the team chat. Targets: memory about 1/sec, guidance under 1.2 s round trip.
+**NEXT TASK:** the first real Mk1.5 clip run confirmed authentication and structured-output
+acceptance (eight frames, five sightings, no errors). Next list candidate account models and
+measure median/p95 latency on 20 real 640px phone frames. Start with `perceptron-mk1.5`;
+compare `isaac-0.3-fast` only if available and compatible. Prepare the results for the teammate
+to share in team chat; agents must not send messages without explicit user authorization.
+Targets: memory about 1/sec, guidance under 1.2 s round trip. The CLI benchmark excludes phone
+upload and audio playback, so measure the full guidance loop separately on the phone.
 
-- [ ] Latency benchmark: 20 real 640px frames x 2 models, post medians
-- [ ] Implement `PerceptronVision.detect` (see the verified/unverified notes in its docstring)
-- [ ] Verify unknowns: bytes vs path input for `image()`, point attribute names, `examples` shape
-- [ ] Prompts + JSON schema for item + spot ("on the desk, next to the lamp")
-- [ ] In-context example photos for each watched item
-- [ ] Room tagging (user dropdown now; auto-detect stretch)
+- [ ] Live model acceptance and latency: 20 real 640px frames per supported candidate; record medians/p95 and failures
+- [x] Implement `PerceptronVision.detect`; installed SDK tested with offline HTTP responses
+- [x] Verify `image(bytes)` and message API; use explicit JSON boxes and labeled reference images
+- [x] Prompts + JSON schema for item + spot ("on the desk, next to the lamp")
+- [x] Support local reference-photo manifests (actual item photos and accuracy testing still needed)
+- [x] User-supplied room tags through the existing phone flow and video importer
+- [ ] Automatic room recognition (stretch)
+- [x] Recorded-video importer and latency benchmark tooling; tested offline
 - [ ] Dedupe/throttle sightings so the timeline is not spammed
 - [ ] Layer 0: recorded video becomes memory, "where" answers aloud
+
+Recorded-video import and a latency benchmark are ready in `python -m app.vision.cli`.
+See `docs/VISION.md`. Mk1.5 accepted a first real clip; broader accuracy, latency benchmarks,
+and other model compatibility remain unverified; the Layer 0 checklist above refers to the real demo.
+
+Integration notes for B/C: real `confidence` is nullable; provider failures are HTTP 503,
+not `found:false`; boxes refer to the prepared upright frame. The importer writes memory but
+does not publish WebSocket events. Keep mock trials in a separate database from real trials.
 
 ## B: Guidance and Audio
 **Owns:** `backend/app/guidance.py`, `/api/guide`, `web/src/phone/audio.js`, `speech.js`, `orientation.js`.

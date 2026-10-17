@@ -26,12 +26,16 @@ voice "find X" ─────── /api/guide ───► vision.detect ─�
 gyroscope yaw keeps the pan correct between server responses
 ```
 
-- **Vision** is isolated in one class, `backend/app/vision.py`. Mock mode (the default) fakes detections so the whole app runs with no API key. The real Perceptron client is a stub for role A to build.
+- **Vision** is isolated in one class, `backend/app/vision/vision.py`. Mock mode (the default) fakes detections so the whole app runs with no API key. The real client, reference-photo support, recorded-video ingestion, and benchmark commands are implemented and tested offline; real accuracy and latency await API credentials. See `docs/VISION.md`.
 - **Guidance math** is a set of pure, unit-tested functions in `backend/app/guidance.py`: pixel position becomes an angle, then a clock hour, a distance bucket, a stereo pan and a beep interval.
 - **The frontend** is React + Vite with plain CSS. It uses browser APIs only: camera, Web Audio, speech synthesis and recognition, device orientation. It never calls Perceptron, because the backend owns the API key.
 
 ## Stack
-Python 3.11+, FastAPI, uvicorn, SQLite, pydantic, pytest. React + Vite. Perceptron vision API (`perceptron-mk1.5`, `isaac-0.3-fast`). Purple (UW's no-code agent builder) for the setup agent.
+Python 3.11+, FastAPI, uvicorn, SQLite, pydantic, pytest. React + Vite. Perceptron SDK 0.4.0
+with `perceptron-mk1.5` as the default; `isaac-0.3-fast` is only a candidate pending account
+availability and structured-output verification. PyAV decodes local videos in memory.
+Purple (UW's no-code agent builder) is planned for the setup agent. Backend dependencies are
+declared in `backend/requirements.txt`; development instructions cover macOS/Linux and Windows.
 
 ## Team and ownership
 | Role | Area |
@@ -47,10 +51,37 @@ Checklists and checkpoints are in [ROLES.md](ROLES.md).
 Community Kitchen (main), Perceptron (our vision API), nebulaONE (the Purple "Sightline Setup" agent turns 3 questions into a profile JSON that is POSTed to `/api/profile`), SideShift, DubHacks Next.
 
 ## Current status
-The scaffold runs end to end in mock mode: backend endpoints, WebSocket events, guidance math (48 passing tests), phone page, and dashboard. Not yet done: the real Perceptron client, on-device verification of speech, audio and gyroscope behavior, and the Purple agent. See [ROLES.md](ROLES.md).
+The scaffold supports the mock flow through backend endpoints, WebSocket events, guidance math,
+the phone page, and dashboard. The real Perceptron adapter is now implemented with validated JSON
+labels and optional item reference photos. Recorded-video import creates searchable sightings
+using recording timestamps, and benchmark commands measure the same frames across candidate models.
+
+The last backend verification during implementation passed **89 tests** without live provider
+calls. Coverage includes the installed SDK over an offline HTTP transport, label validation,
+API integration, database migration, image preparation, and generated-video ingestion. This is
+a recorded result from that implementation, not a fresh test run on every documentation edit.
+
+For integration, real detections have `confidence: null`; successful empty results retain previous
+memory, while provider failures return HTTP 503 and save no sightings for that frame. Frames are
+oriented and resized consistently for inference, crops, and dashboard boxes. See
+[CONTRACT.md](CONTRACT.md) for exact behavior.
+
+The first live Mk1.5 clip test succeeded: eight sampled frames, five sightings (phone, wallet,
+keys), median inference 469.9 ms, and no errors. Saved object crops were visually checked.
+See [VISION.md](VISION.md) for the output file and the limits of this small trial.
+
+Still pending: broader real-prop accuracy and latency benchmarks, model comparisons,
+dedupe/throttling, on-device speech/audio/gyroscope verification, and the Purple agent.
+Recorded-video import uses a user-supplied room, adds duplicates if rerun, and does not stream
+dashboard events. The real Layer 0 demo is not yet verified. See [VISION.md](VISION.md) and
+[ROLES.md](ROLES.md).
 
 ## Where to read next
+- [Documentation index](README.md): required new-chat reading and document ownership
+- [SUMMARY.md](../SUMMARY.md): latest changes, user impact, validation, and next steps
 - [README.md](../README.md): run it in two minutes
 - [CONTRACT.md](CONTRACT.md): API contract and how the scaffold resolves open details
 - [ROLES.md](ROLES.md): who owns what, TODOs, checkpoints
+- [VISION.md](VISION.md): implemented vision pipeline, video import, credentials, and benchmarks
+- [AGENTS.md](../AGENTS.md): repository instructions and new-chat context loading
 - [CLAUDE.md](../CLAUDE.md): conventions for Claude Code sessions

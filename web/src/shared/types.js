@@ -9,7 +9,7 @@
  * @property {string} room
  * @property {string} spot
  * @property {number[]} box        [x1, y1, x2, y2], 0..1
- * @property {number} confidence
+ * @property {number|null} confidence  null when the provider supplies no calibrated score
  * @property {string} ts           ISO timestamp
  * @property {string} thumb        URL path, e.g. /api/thumbs/abc.jpg ("" if none)
  */
@@ -18,7 +18,7 @@
  * @typedef {Object} WhereResponse
  * @property {string} item
  * @property {boolean} found
- * @property {{room:string, spot:string, minutes_ago:number, thumb:string, confidence:number}|null} last
+ * @property {{room:string, spot:string, minutes_ago:number, thumb:string, confidence:number|null}|null} last
  * @property {Sighting[]} history   up to 5
  * @property {string} say
  */

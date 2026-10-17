@@ -25,7 +25,7 @@ class Sighting(BaseModel):
     room: str
     spot: str
     box: list[float]
-    confidence: float
+    confidence: float | None
     ts: str
     thumb: str
 
@@ -39,7 +39,7 @@ class WhereLast(BaseModel):
     spot: str
     minutes_ago: float
     thumb: str
-    confidence: float
+    confidence: float | None
 
 
 class WhereResponse(BaseModel):

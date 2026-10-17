@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sightings (
     id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT NOT NULL, room TEXT NOT NULL,
     spot TEXT NOT NULL, x1 REAL, y1 REAL, x2 REAL, y2 REAL,
-    confidence REAL NOT NULL, ts TEXT NOT NULL, thumb TEXT NOT NULL DEFAULT '');
+    confidence REAL, ts TEXT NOT NULL, thumb TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_sightings_item_ts ON sightings (item, ts);
 """
 
@@ -61,12 +61,29 @@ def connect():
     try:
         if path not in _initialized:
             conn.executescript(SCHEMA)
+            _migrate_confidence(conn)
             _seed_defaults(conn)
             _initialized.add(path)
         yield conn
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate_confidence(conn: sqlite3.Connection) -> None:
+    """Preserve existing sightings while allowing an unknown provider confidence."""
+    columns = conn.execute("PRAGMA table_info(sightings)").fetchall()
+    if not any(c["name"] == "confidence" and c["notnull"] for c in columns):
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("""CREATE TABLE sightings_nullable (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT NOT NULL, room TEXT NOT NULL,
+        spot TEXT NOT NULL, x1 REAL, y1 REAL, x2 REAL, y2 REAL,
+        confidence REAL, ts TEXT NOT NULL, thumb TEXT NOT NULL DEFAULT '')""")
+    conn.execute("INSERT INTO sightings_nullable SELECT * FROM sightings")
+    conn.execute("DROP TABLE sightings")
+    conn.execute("ALTER TABLE sightings_nullable RENAME TO sightings")
+    conn.execute("CREATE INDEX idx_sightings_item_ts ON sightings (item, ts)")
 
 
 def _seed_defaults(conn: sqlite3.Connection) -> None:
@@ -163,7 +180,7 @@ def save_thumb(frame: bytes, box: list[float]) -> str:
     return f"{THUMB_URL_PREFIX}/{fname}"
 
 
-def add_sighting(item: str, room: str, spot: str, box: list[float], confidence: float,
+def add_sighting(item: str, room: str, spot: str, box: list[float], confidence: float | None,
                  ts: str, thumb: str) -> dict:
     """Insert a sighting and return it in contract shape."""
     with connect() as c:

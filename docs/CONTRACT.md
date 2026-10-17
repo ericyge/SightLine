@@ -1,15 +1,20 @@
 # API contract (backend implements, frontend consumes; keep field names EXACTLY)
 
+Read the implementation notes below together with the endpoint list. They define the current
+behavior where the original scaffold sketch is abbreviated. Setup and video-tool commands
+live in [VISION.md](VISION.md).
+
 Stored records:
   item:     { name, aliases[], description }
   room:     { name }
-  sighting: { item, room, spot, box:[x1,y1,x2,y2] (0..1), confidence, ts (ISO), thumb (path) }
+  sighting: { item, room, spot, box:[x1,y1,x2,y2] (0..1), confidence (number|null), ts (ISO), thumb (path) }
 
 Endpoints:
   POST /api/observe   multipart: frame (JPEG), room (string), ts (optional ISO)
       -> { sightings: [sighting...] }   saves sightings found in this frame, pushes an event to /ws/events
   GET  /api/where?item=wallet
-      -> { item, last: { room, spot, minutes_ago, thumb, confidence }, history: [ ... up to 5 ... ], say: "On your bedroom desk, next to the lamp, about 4 minutes ago." }  (404-style {found:false, say:"I haven't seen your wallet yet."} if never seen)
+      -> { item, found:true, last: { room, spot, minutes_ago, thumb, confidence }, history: [ ... up to 5 ... ], say: "In your bedroom, on the desk, next to the lamp, about 4 minutes ago." }
+      -> HTTP 200 { item, found:false, last:null, history:[], say:"I haven't seen your wallet yet." } if watched but never seen
   POST /api/guide     multipart: frame (JPEG), item (string), yaw_deg (optional float)
       -> { found, point:[x,y], box:[x1,y1,x2,y2], angle, clock, distance ("far"|"near"|"reach"), pan, say, beep_ms }
       e.g. { "found": true, "point": [0.71, 0.62], "box": [0.66,0.55,0.77,0.69], "angle": 13.7, "clock": 12, "distance": "near", "pan": 0.46, "say": "Wallet slightly right, almost in reach", "beep_ms": 350 }
@@ -33,7 +38,14 @@ Endpoints:
 
 # Scaffold notes (how the code resolves details the contract leaves open)
 
-Everything above is verbatim from the project brief. The items below are what the scaffold actually does; change them deliberately and update this file.
+The endpoint sketch originated in the project brief and is maintained to match the implementation.
+The notes below specify additional behavior; update both when behavior changes.
+
+- **Vision implementation:** `backend/app/vision/vision.py`, re-exported through the `vision` package.
+- **`confidence` is nullable:** real Perceptron labels use `null` because no calibrated score is available. Mock scores remain numeric. SQLite automatically migrates older non-null columns while preserving existing sightings.
+- **Frame preparation:** `/api/observe` and `/api/guide` decode and orient the uploaded image, strip metadata, and resize proportionally to `VISION_FRAME_MAX_PX` (default 640). All boxes, live dashboard frames, and saved crops use this same orientation. JPEG, PNG, and WebP are accepted; invalid images return 422 and uploads over 8 MiB return 413.
+- **Vision failures:** HTTP 503 `{detail: ...}` for provider errors, timeouts, incomplete replies, or invalid labels. No sightings are saved for a failed frame. A successful empty list means no current detection, and never deletes previous sightings. The client never falls back to mock on an error.
+- **Timestamps:** new `/api/observe` timestamps are normalized to UTC; invalid ISO timestamps return 422. The video importer requires a recording start time with a zone and adds each frame's presentation offset. Existing naive API timestamps are still treated as UTC.
 
 - **`/api/where` never returns HTTP 404.** Never-seen is `200 {item, found:false, last:null, history:[], say:"I haven't seen your wallet yet."}`. An item not on the watchlist is also `found:false` with `say:"I'm not watching for X."`. Found responses include `found:true`.
 - **`/api/where` `say` wording:** `"In your bedroom, on the desk, next to the lamp, about 4 minutes ago."` (room + spot as stored). `history` entries are full sighting records, newest first. `minutes_ago` is a float.
