@@ -86,6 +86,8 @@ class HealthResponse(BaseModel):
     mode: str
     mock: bool
     stt: str = "browser"   # "elevenlabs": phone should upload audio; "browser": use SpeechRecognition
+    vision: dict | None = None   # live Perceptron latency {calls, p50_ms, p95_ms, errors, dropped}; None in mock
+    guide_max_fps: float = 3.0   # clients send at most this many /api/guide frames per second
 
 
 class TranscribeResponse(BaseModel):

@@ -15,13 +15,13 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 from fastapi import FastAPI, HTTPException, File, Form, Request, UploadFile, WebSocket, WebSocketDisconnect  # noqa: E402
 from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import FileResponse  # noqa: E402
+from fastapi.responses import FileResponse, Response  # noqa: E402
 
 from . import db, guidance, llm, stt  # noqa: E402
 from .events import broadcaster  # noqa: E402
 from .models import (ChatRequest, ChatResponse, GuideResponse, HealthResponse, ObserveResponse, OkResponse, Profile,  # noqa: E402
                      TranscribeResponse, WhereLast, WhereResponse)
-from .vision import get_vision  # noqa: E402
+from .vision import VisionBusy, get_vision  # noqa: E402
 
 log = logging.getLogger("sightline")
 MAX_EVENT_FRAME_BYTES = 200_000   # frames are only forwarded live to the dashboard, never stored
@@ -49,6 +49,14 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 
 # ---- helpers ----------------------------------------------------------------------------
+
+def guide_max_fps() -> float:
+    """Cap on /api/guide frames per second per client (env GUIDE_MAX_FPS, default 3, kept in 0.5..10)."""
+    try:
+        return min(10.0, max(0.5, float(os.getenv("GUIDE_MAX_FPS") or 3)))
+    except ValueError:
+        return 3.0
+
 
 def fov_h() -> float:
     return float(os.getenv("FOV_H_DEGREES", "65"))
@@ -113,7 +121,8 @@ def health():
     """Mode check so the UI can show a MOCK badge."""
     v = get_vision()
     client = stt.get_stt()
-    return HealthResponse(mode=v.mode, mock=v.mock, stt=client.provider if client else "browser")
+    return HealthResponse(mode=v.mode, mock=v.mock, stt=client.provider if client else "browser",
+                          vision=v.stats(), guide_max_fps=guide_max_fps())
 
 
 @app.get("/api/profile", response_model=Profile)
@@ -135,8 +144,11 @@ async def observe(request: Request, frame: UploadFile = File(...), room: str = F
     data = await frame.read()
     when = _parse_ts(ts).isoformat() if ts else _now_iso()
     # TODO(A): skip saving when an item hasn't moved since its last sighting (dedupe / throttle).
-    detections = await run_in_threadpool(
-        get_vision().detect, data, db.list_items(), room, _mock_hints(request))
+    try:
+        detections = await run_in_threadpool(
+            get_vision().detect, data, db.list_items(), room, _mock_hints(request))
+    except VisionBusy:
+        return Response(status_code=204)   # Perceptron is busy with an earlier frame: drop this one
     sightings = [db.add_sighting(d.item, room, d.spot, d.box, d.confidence, when,
                                  db.save_thumb(data, d.box)) for d in detections]
     broadcaster.publish(_event("sighting", sightings=sightings, frame=_frame_data_url(data)))
@@ -176,8 +188,11 @@ async def guide(request: Request, frame: UploadFile = File(...), item: str = For
     name = db.resolve_item(item)
     if name is None:
         return GuideResponse(found=False, say=f"I'm not watching for {item.strip().lower()}.")
-    detections = await run_in_threadpool(
-        get_vision().detect, data, [db.get_item(name)], None, _mock_hints(request))
+    try:
+        detections = await run_in_threadpool(
+            get_vision().detect, data, [db.get_item(name)], None, _mock_hints(request))
+    except VisionBusy:
+        return Response(status_code=204)   # drop; the client keeps its last result and the local beeps
     box = next((d.box for d in detections if d.item == name), None)
     now = time.monotonic()
     state = _guide_states.get(name)
