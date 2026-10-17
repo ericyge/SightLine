@@ -5,18 +5,20 @@ instead of relying only on changing model descriptions such as “on the counter
 Places, landmarks, directed connections, sightings, and sighting-to-place links live in the
 existing SQLite database selected by `DB_PATH`. They survive backend restarts.
 
-This is the memory foundation for returning to an object. It does not yet recognize the
-user's current place/facing, calculate a route, check obstacles, or give room-to-room
-instructions. `/api/guide` still points toward an object visible in the current frame.
-ElevenLabs has not been integrated. Memory commands themselves do not call Perceptron.
+Taught places and directed connections feed room-to-room navigation: `/api/guide` localizes
+the camera against place landmarks (Perceptron structured call in `vision.localize`), plans a
+BFS route over `place_connections` (`memory.plan_route`), and speaks the next stored
+instruction until the target item is visible again (then existing beep/clock guidance).
+Facing/obstacle checks and ElevenLabs are not implemented. Memory CLI commands themselves do
+not call Perceptron.
 
 ## What is remembered
 
 - **Place:** stable ID, readable name, room, description, and text landmarks. For example,
   `kitchen_counter`, “counter beside the sink,” with landmarks “sink” and “faucet.”
 - **Connection:** an explicitly taught direction from one place to another, with a departure
-  view, instruction, and arrival view. The reverse direction is not invented. These are
-  saved map annotations for future navigation, not instructions currently executed by the app.
+  view, instruction, and arrival view. The reverse direction is not invented. `/api/guide`
+  speaks these instructions in order along the shortest directed path.
 - **Sighting:** existing object, room, model-written spot, time, crop, box, and confidence,
   plus a stable numeric `id`, optional `place_id` linking the object to its destination,
   `place_source` (`"none"`, `"manual"`, or `"automatic"`), and `place_reason`.
@@ -137,11 +139,33 @@ See [CONTRACT.md](CONTRACT.md) for exact fields. The memory routes do not broadc
 events; reload the map/items/where response after edits. Updating the profile does not delete
 places or historical sightings, but `items`/`where` only search watched items.
 
+## Room-to-room navigation (mock test)
+
+After teaching `examples/two_room_memory.json` and assigning a sighting to `kitchen_counter`:
+
+```bash
+# Force: item not in frame, camera at bedroom_door
+curl -s -X POST http://localhost:8000/api/guide \
+  -F frame=@/path/to/frame.jpg -F item=keys \
+  -H "X-Mock-Hide: 1" -H "X-Mock-Place: bedroom_door"
+```
+
+Debug localization alone: `python -m app.vision.cli localize frame.jpg --mock --mock-place bedroom_door`.
+
+## Walkthrough mapping (preferred training; no hand-written JSON)
+
+Build places and connections by walking with the camera:
+
+```bash
+export DB_PATH=sightline-map.db THUMBS_DIR=thumbs/map
+python -m app.vision.cli mapwalk /path/to/walkthrough.MOV --mock   # omit --mock for Perceptron
+python -m app.memory.cli map
+```
+
+Default sample rate is 0.5 fps. Reuse the same `DB_PATH` across clips to grow the map.
+JSON `teach` remains an optional override, not the required training path.
+
 ## Remaining work
 
-Verify automatic place discovery and landmark matching on live Perceptron clips, determine
-the user's current camera position and facing when no watched object is in view, then
-select routes with live arrival/obstacle checks and feed short confirmed cues to ElevenLabs.
-The destination IDs, automatic/manual place assignments, and directed connections provide the
-stored inputs for that work. Repeated video imports still add duplicate sightings; this change
-does not add deduplication.
+Verify mapwalk + localize on live Perceptron apartment walks; expose a full directions list
+after offline video+where; facing/obstacle checks; ElevenLabs; sighting dedupe.

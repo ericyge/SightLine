@@ -24,8 +24,14 @@ Endpoints:
   PUT  /api/memory/sightings/{sighting_id}/place JSON: { place_id:string|null }
       -> updated sighting; null clears only this link
   POST /api/guide     multipart: frame (JPEG), item (string), yaw_deg (optional float)
-      -> { found, point:[x,y], box:[x1,y1,x2,y2], angle, clock, distance ("far"|"near"|"reach"), pan, say, beep_ms }
-      e.g. { "found": true, "point": [0.71, 0.62], "box": [0.66,0.55,0.77,0.69], "angle": 13.7, "clock": 12, "distance": "near", "pan": 0.46, "say": "Wallet slightly right, almost in reach", "beep_ms": 350 }
+      -> { found, point:[x,y], box:[x1,y1,x2,y2], angle, clock, distance ("far"|"near"|"reach"), pan, say, beep_ms,
+           mode ("visual"|"navigate"|"lost"), current_place (place_id|null), destination (place|null), next_instruction (string|null) }
+      visual e.g. { "found": true, "point": [0.71, 0.62], "box": [0.66,0.55,0.77,0.69], "angle": 13.7, "clock": 12,
+        "distance": "near", "pan": 0.46, "say": "Wallet slightly right, almost in reach", "beep_ms": 350,
+        "mode": "visual", "current_place": null, "destination": {...}|null, "next_instruction": null }
+      navigate e.g. { "found": false, "point": null, "box": null, "angle": null, "clock": null, "distance": null,
+        "pan": 0.0, "say": "Follow the hallway toward the kitchen entrance.", "beep_ms": 0,
+        "mode": "navigate", "current_place": "bedroom_door", "destination": {...}, "next_instruction": "Follow the hallway toward the kitchen entrance." }
   POST /api/profile   JSON: { watchlist:[{name,description,home_spot}], rooms:[str], guidance_style:"clock_face"|"left_right"|"beeps_only" }
       -> { ok:true }  stores the watchlist/rooms/style that the Purple setup agent produces
   GET  /api/profile   -> current profile (default watchlist: keys, wallet, phone, glasses, medication; rooms: bedroom, kitchen, living room)
@@ -74,7 +80,9 @@ are always explicitly taught, directed, and do not imply a reverse path.
 `departure_view` and `arrival_view` store the facing/view context for that direction.
 Map updates are atomic merges, not replacements. A place ID cannot change rooms. Profile
 updates retain places and sightings; only currently watched items are returned by item lookup.
-There is no route planning, live camera localization, obstacle detection, or ElevenLabs integration yet.
+`/api/guide` localizes the camera against taught places and plans a directed BFS route when the
+target item is not visible and the newest sighting has a destination. Obstacle detection and
+ElevenLabs are not implemented.
 
 Validation: place IDs match `[a-z0-9][a-z0-9_-]{0,79}`; names/rooms/landmarks are nonblank,
 trimmed strings up to 160 characters; descriptions/view context/instructions are nonblank,
@@ -116,15 +124,19 @@ The notes below specify additional behavior; update both when behavior changes.
 - **`/api/where` `say` wording:** unassigned sightings retain `"In your bedroom, on the desk, next to the lamp, about 4 minutes ago."` (room + spot), or `"Last seen on the desk, next to the lamp, about 4 minutes ago."` when `room` is `"unknown room"`. Assigned sightings use `"Last seen at counter beside the sink in your kitchen, about 4 minutes ago."` (omitting `"in your unknown room"` when the place's room is `"unknown room"`). `history` entries are full sighting records, newest first. `minutes_ago` is a float.
 - **`item` matching & open-vocabulary:** names, watchlist aliases, and common everyday object synonyms (`cup`/`mug`/`coffee cup`/`tumbler`, `water bottle`/`bottle`/`thermos`, `bag`/`backpack`/`purse`, `headphones`/`earbuds`/`airpods`, `cane`/`white cane`, etc.) are case-insensitive; `"my"`/`"the"`/`"a"`/`"an"` prefixes and a trailing plural `"s"` are ignored (`"my meds"` -> `medication`, `"my mug"` -> `cup`, `"my bottle"` -> `water bottle`). `/api/observe` detects both watchlist items and any other visible everyday personal/household objects on surfaces, and `/api/guide` can guide to any item on demand.
 - **`thumb`** is a URL path served by the backend: `/api/thumbs/<id>.jpg` (96 px max crop around the box). It is `""` if the frame could not be decoded.
-- **`/api/guide` when not found:** `found:false`, `point/box/angle/clock/distance` are `null`, `pan` 0, `beep_ms` 0 (silence). `say` is `""` until the item has been missing for 2 s, then `"Lost it. Turn slowly left."` once.
-- **`/api/guide` `say`** is `""` when the direction has not changed since the last cue (server tracks this per item; a pause longer than 10 s starts a fresh session). The returned `angle` is smoothed against the previous angle if it was seen within 3 s.
+- **`/api/guide` modes:**
+  - **visual:** target item is in the current frame. Existing pan/clock/beep guidance; `mode:"visual"`. `destination` is filled from the newest sighting when assigned. `current_place` and `next_instruction` are null (localization is skipped to save a provider call).
+  - **navigate:** item not visible, destination known, current place localized, and a directed path exists (or the user is already at the destination). `found:false`, geometry null, `beep_ms` 0. `say` / `next_instruction` use the next taught connection instruction; speak only when the hop changes. At the destination without a visible item: `say` like `"You're at counter beside the sink. Look around slowly."` with `next_instruction` null.
+  - **lost:** cannot offer visual or navigate cues. Includes: no destination on the newest sighting (legacy `"Lost it. Turn slowly left."` after 2 s), destination known but localization failed, or no directed path. Honest fallbacks such as `"Last seen at …, but I can't tell where you are yet."`
+- **`/api/guide` when not found (visual-lost, no destination):** `found:false`, `point/box/angle/clock/distance` are `null`, `pan` 0, `beep_ms` 0 (silence). `say` is `""` until the item has been missing for 2 s, then `"Lost it. Turn slowly left."` once.
+- **`/api/guide` `say`** is `""` when the direction or navigate hop has not changed since the last cue (server tracks this per item; a pause longer than 10 s starts a fresh session). The returned `angle` is smoothed against the previous angle if it was seen within 3 s.
 - **`yaw_deg`** is accepted but not used server-side; yaw compensation happens in the browser (`web/src/phone/orientation.js`). Compensation wraps the yaw difference across 0/360.
 - **`clock_hour`** rounds halves up (`floor(x + 0.5)`) instead of Python's banker's `round()`, so 15 deg -> 1 and -15 deg -> 12.
 - **`distance_bucket`** rounds the box height to 4 decimals before comparing, so float noise (`0.6 - 0.5 = 0.0999...`) cannot flip a boundary.
 - **Extra endpoint:** `GET /api/health -> {ok, mode, mock}` so UIs can show a MOCK badge.
 - **WebSocket events** all carry `mock: bool`:
   - `{type:"sighting", sightings:[sighting...], frame: <data URL | null>}` one per `/api/observe` call
-  - `{type:"guide", item, frame, found, point, box, angle, clock, distance, pan, say, beep_ms}` one per `/api/guide` call
+  - `{type:"guide", item, frame, found, point, box, angle, clock, distance, pan, say, beep_ms, mode, current_place, destination, next_instruction}` one per `/api/guide` call
   - `{type:"say", text, source:"where"|"guide"}` whenever the app has something to speak
   - `frame` is forwarded live to the dashboard only (omitted when over 200 KB) and never stored.
-- **Mock hints:** header `X-Mock-Item-X: 0.8` (or query `?mock_x=0.8`) forces the detected item's center x; `X-Mock-Item-H` / `?mock_h=0.4` forces box height (0.4 at the default y gives `"reach"`).
+- **Mock hints:** header `X-Mock-Item-X: 0.8` (or query `?mock_x=0.8`) forces the detected item's center x; `X-Mock-Item-H` / `?mock_h=0.4` forces box height (0.4 at the default y gives `"reach"`). `X-Mock-Hide: 1` / `?mock_hide=1` forces no detection so navigate can run. `X-Mock-Place: bedroom_door` / `?mock_place=bedroom_door` forces mock localization (`unknown` forces null).

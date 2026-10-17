@@ -66,6 +66,17 @@ focused capture of one surface. See [MEMORY.md](MEMORY.md) for saved places/land
 manual assignment without reprocessing, and recall through `python -m app.memory.cli where wallet`.
 No server is needed for that query.
 
+Camera place matching (no watched object required):
+
+```bash
+python -m app.vision.cli localize /absolute/path/frame.jpg --mock --mock-place bedroom_door
+python -m app.vision.cli localize /absolute/path/frame.jpg --room kitchen
+```
+
+`--mock --mock-place` forces a place id for plumbing tests. Real mode uses a structured
+Perceptron call and only accepts a match when at least two candidate landmarks are evidenced.
+Never invents confidence scores.
+
 Start the backend and query:
 
 ```bash

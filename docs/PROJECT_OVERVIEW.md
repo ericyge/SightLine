@@ -78,12 +78,13 @@ Location memory now supports both taught places and automatic per-object place d
 room-to-room navigation. The phone defaults its room selector to `Automatic` and sends a
 `session_id` so observations automatically resolve per-object places when at least two fixed
 landmarks are visible, while keeping ambiguous or carried sightings unassigned (`place_id: null`).
-No route or current camera position is inferred from the saved map.
+`/api/guide` can localize the camera to a taught place and speak directed connection
+instructions toward the newest sighting's destination when the item is not in frame.
 
-Still pending: live Perceptron verification of automatic place discovery/matching, current
-camera position/facing recognition, route planning, obstacle checks, ElevenLabs speech,
-broader real-prop accuracy and latency benchmarks, model comparisons, dedupe/throttling,
-on-device speech/audio/gyroscope verification, and the Purple agent.
+Still pending: live Perceptron verification of automatic place discovery/matching and
+localization, facing/obstacle checks, ElevenLabs speech, broader real-prop accuracy and
+latency benchmarks, model comparisons, dedupe/throttling, on-device speech/audio/gyroscope
+verification, and the Purple agent.
 Recorded-video import uses a user-supplied room, adds duplicates if rerun, and does not stream
 dashboard events. The real Layer 0 demo is not yet verified. See [VISION.md](VISION.md) and
 [ROLES.md](ROLES.md).

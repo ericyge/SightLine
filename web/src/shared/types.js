@@ -37,6 +37,8 @@
  * @property {string} say
  */
 
+/** @typedef {"visual"|"navigate"|"lost"} GuideMode */
+
 /**
  * @typedef {Object} GuideResponse
  * @property {boolean} found
@@ -48,6 +50,10 @@
  * @property {number} pan            -1..1
  * @property {string} say            "" when nothing new to say
  * @property {number} beep_ms        0 = silent
+ * @property {GuideMode} mode        visual when item in frame; navigate for room-to-room; lost otherwise
+ * @property {string|null} current_place   localized place_id, or null
+ * @property {Place|null} destination      newest sighting's place when known
+ * @property {string|null} next_instruction  spoken connection instruction when mode is navigate
  */
 
 /**
@@ -64,6 +70,10 @@
  * @property {boolean} mock
  * @property {Sighting[]} [sightings]  type "sighting"
  * @property {string|null} [frame]     data URL of the latest frame (sighting / guide)
+ * @property {GuideMode} [mode]        type "guide"
+ * @property {string|null} [current_place] type "guide"
+ * @property {Place|null} [destination]    type "guide"
+ * @property {string|null} [next_instruction] type "guide"
  * @property {string} [text]           type "say"
  * @property {string} [source]         type "say": "where" | "guide"
  */

@@ -64,8 +64,16 @@ class WhereResponse(BaseModel):
     say: str
 
 
+GuideMode = Literal["visual", "navigate", "lost"]
+
+
 class GuideResponse(BaseModel):
-    """When found=False, geometry fields are null and beep_ms is 0 (silence)."""
+    """When found=False, geometry fields are null and beep_ms is 0 (silence).
+
+    mode visual: item in frame (existing beep/clock guidance).
+    mode navigate: room-to-room cue toward the newest sighting's destination.
+    mode lost: cannot see the item and cannot offer a route cue.
+    """
     found: bool
     point: list[float] | None = None
     box: list[float] | None = None
@@ -75,6 +83,10 @@ class GuideResponse(BaseModel):
     pan: float = 0.0
     say: str = ""
     beep_ms: int = 0
+    mode: GuideMode = "visual"
+    current_place: str | None = None
+    destination: Place | None = None
+    next_instruction: str | None = None
 
 
 class WatchItem(BaseModel):

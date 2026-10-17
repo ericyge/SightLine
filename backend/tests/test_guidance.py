@@ -99,6 +99,14 @@ def test_say_cues_are_short():
             assert len(g.say("medication", angle, clock, "far", style)[0].split()) < 8
 
 
+def test_navigate_say_only_on_change():
+    text, key = g.navigate_say("Walk forward", "a->b", None)
+    assert text == "Walk forward" and key == "a->b"
+    assert g.navigate_say("Walk forward", "a->b", key) == ("", "a->b")
+    text2, key2 = g.navigate_say("Turn right", "b->c", key)
+    assert text2 == "Turn right" and key2 == "b->c"
+
+
 def test_compute_guide_found_matches_contract_example():
     state = g.GuideState(since=0.0)
     r = g.compute_guide("wallet", [0.66, 0.55, 0.77, 0.69], state, "left_right", 65, now=1.0)

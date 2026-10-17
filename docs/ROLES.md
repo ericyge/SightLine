@@ -6,8 +6,10 @@ Four owners, one file area each, so merges stay quiet. Search the code for `TODO
 **Owns:** `backend/app/vision/`, `backend/app/memory/`, `backend/app/frames.py`, `backend/app/db.py`, `/api/observe`, `/api/where`, `/api/memory/*`.
 Real Perceptron client, prompts + JSON schemas, in-context photos of each item, room tagging, automatic and manual place assignment.
 
-**NEXT TASK:** verify automatic place discovery/matching and manual assignments on real clips with [MEMORY.md](MEMORY.md),
-then implement matching current camera views to places for user localization/facing. Memory and automatic per-object place assignment are persistent, but camera localization and navigation are not implemented. The first real Mk1.5 clip run confirmed authentication and structured-output
+**NEXT TASK:** verify automatic place discovery/matching, `vision.localize`, and navigate cues on
+real clips with [MEMORY.md](MEMORY.md). Memory, automatic place assignment, camera localization,
+and directed BFS routing are implemented in mock; live Perceptron accuracy for localization is
+unverified. The first real Mk1.5 clip run confirmed authentication and structured-output
 acceptance (eight frames, five sightings, no errors). Next list candidate account models and
 measure median/p95 latency on 20 real 640px phone frames. Start with `perceptron-mk1.5`;
 compare `isaac-0.3-fast` only if available and compatible. Prepare the results for the teammate
@@ -24,8 +26,9 @@ upload and audio playback, so measure the full guidance loop separately on the p
 - [x] Persistent taught and automatically discovered places, text landmarks, directed connections, and per-sighting destination links (`place_source`, `place_reason`)
 - [x] Automatic per-object place discovery and landmark matching during `/api/observe` and video ingestion
 - [x] Memory API/CLI, automatic legacy migration, and newest-sighting destination recall
-- [ ] Match current camera views to taught places and determine camera position/facing
-- [ ] Route selection and live arrival/obstacle checks with B/C
+- [x] Match current camera views to taught places (`vision.localize`; facing not inferred)
+- [x] Route selection via directed BFS (`memory.plan_route`) wired into `/api/guide` navigate mode
+- [ ] Live arrival/obstacle checks with B/C; live Perceptron verification of localization
 - [ ] Automatic room recognition (live Perceptron verification)
 - [x] Recorded-video importer and latency benchmark tooling; tested offline
 - [ ] Dedupe/throttle sightings so the timeline is not spammed
@@ -40,7 +43,7 @@ not `found:false`; boxes refer to the prepared upright frame. The importer write
 does not publish WebSocket events. Keep mock trials in a separate database from real trials.
 Sightings now include `id` and `place_id`; `/where` adds a nullable `destination` place.
 An unmapped newest sighting returns null even when an older one was mapped. Connections
-are stored instructions, not a verified route from the user's current position.
+are executed as navigate cues when localization succeeds; facing and obstacles are unverified.
 
 ## B: Guidance and Audio
 **Owns:** `backend/app/guidance.py`, `/api/guide`, `web/src/phone/audio.js`, `speech.js`, `orientation.js`.
@@ -51,7 +54,7 @@ Beep engine, spatial pan, gyroscope smoothing. Stretch: hand guidance with Media
 - [ ] Verify yaw sign and drift on real iPhone and Android (`orientation.js` is unverified on devices)
 - [ ] Tune speech cadence; confirm "speak only on change" feels right
 - [ ] Voice command phrasing in `parseCommand`
-- [ ] ElevenLabs speech for confirmed navigation cues once localization/routing exists
+- [ ] ElevenLabs speech for confirmed navigation cues (browser SpeechSynthesis speaks `say` today)
 - [ ] Stretch: MediaPipe Hands final-reach guidance
 
 ## C: App and Dashboard

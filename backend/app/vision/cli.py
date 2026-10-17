@@ -14,6 +14,8 @@ import av
 from dotenv import load_dotenv
 
 from .. import db, memory
+from ..frames import prepare_frame
+from ..memory.mapwalk import mapwalk_video
 from ..memory.observation import observe_and_save
 from . import MockVision, PerceptronVision, VisionUnavailable
 from .video import sample_video
@@ -103,6 +105,42 @@ def list_models(args) -> int:
     return 0
 
 
+def localize_frame(args) -> int:
+    """Match one still image to taught places (debug helper)."""
+    vision = _vision(args)
+    try:
+        jpeg = prepare_frame(args.image.read_bytes(), args.size)
+        places = memory.get_map()["places"]
+        if args.room:
+            room = args.room.strip().casefold()
+            places = [p for p in places if p["room"].casefold() == room]
+        hints = {"place": args.mock_place} if args.mock_place is not None else None
+        result = vision.localize(jpeg, places, hints)
+        print(json.dumps({"mock": vision.mock, "place_id": result.place_id,
+                          "reason": result.reason, "matched_landmarks": result.matched_landmarks,
+                          "candidates": [p["id"] for p in places]}), flush=True)
+    finally:
+        vision.close()
+    return 0
+
+
+def mapwalk(args) -> int:
+    """Build places + directed connections from a walkthrough video (no hand-written map JSON)."""
+    vision = _vision(args)
+    try:
+        frames = sample_video(args.video, fps=args.fps, max_px=args.size, limit=args.limit)
+        for row in mapwalk_video(vision, frames, room=args.room):
+            print(json.dumps({"mock": vision.mock, **row}), flush=True)
+        summary = memory.get_map()
+        print(json.dumps({"mock": vision.mock, "summary": True,
+                          "places": len(summary["places"]),
+                          "connections": len(summary["connections"]),
+                          "map": summary}), flush=True)
+    finally:
+        vision.close()
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     commands = p.add_subparsers(dest="command", required=True)
@@ -125,6 +163,22 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--task", choices=["observe", "guide"], default="observe")
             command.add_argument("--room", default="bedroom")
             command.add_argument("--item", default="wallet")
+    loc = commands.add_parser("localize", help="Match a still image to taught places")
+    loc.set_defaults(action=localize_frame)
+    loc.add_argument("image", type=Path)
+    loc.add_argument("--room", help="Limit candidates to this room")
+    loc.add_argument("--size", type=int, default=int(os.getenv("VISION_FRAME_MAX_PX", "640")))
+    loc.add_argument("--mock", action="store_true", help="Use mock localization; make no API calls")
+    loc.add_argument("--mock-place", help="Mock only: force this place_id (or 'unknown')")
+    walk = commands.add_parser("mapwalk",
+                               help="Map apartment places/connections from a walkthrough video (no JSON labels)")
+    walk.set_defaults(action=mapwalk)
+    walk.add_argument("video", type=Path)
+    walk.add_argument("--fps", type=float, default=0.5, help="Sample rate (default 0.5 = every 2s)")
+    walk.add_argument("--size", type=int, default=int(os.getenv("VISION_FRAME_MAX_PX", "640")))
+    walk.add_argument("--limit", type=int)
+    walk.add_argument("--room", help="Optional room hint when the whole clip is one room")
+    walk.add_argument("--mock", action="store_true", help="Use mock place surveys; make no API calls")
     commands.add_parser("models").set_defaults(action=list_models)
     return p
 
