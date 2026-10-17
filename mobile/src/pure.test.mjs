@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { angleDiff, cameraHeading, compensate, panFromAngle, pitchBoost } from './guidance.ts';
+import { guideIntervalMs, waitMs } from './pacing.ts';
 import { makeBeepWav } from './wav.ts';
 
 const samples = (wav) => {
@@ -79,4 +80,13 @@ test('cameraHeading: upright phone facing north is 0, turning left decreases it'
   assert.ok(Math.abs(cameraHeading(0, rad(90), 0)) < 1e-9);
   assert.ok(Math.abs(cameraHeading(rad(90), rad(90), 0) - 270) < 1e-6);   // turned left 90 deg
   assert.ok(Math.abs(cameraHeading(rad(-90), rad(90), 0) - 90) < 1e-6);   // turned right 90 deg
+});
+
+test('guide pacing: 3 fps default, clamped, never negative', () => {
+  assert.equal(guideIntervalMs(3), 333);
+  assert.equal(guideIntervalMs(100), 100);
+  assert.equal(guideIntervalMs(0.01), 2000);
+  for (const bad of [undefined, null, NaN, 0, -2]) assert.equal(guideIntervalMs(bad), 333);
+  assert.equal(waitMs(333, 100), 233);
+  assert.equal(waitMs(333, 900), 0);
 });

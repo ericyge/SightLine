@@ -4,7 +4,11 @@
 export type Intent = 'find' | 'where' | 'stop' | 'set_room' | 'chitchat';
 export type ChatTurn = { role: 'user' | 'assistant'; content: string };
 export type ChatResponse = { intent: Intent; item: string | null; room: string | null; say: string; provider: string };
-export type Health = { ok: boolean; mode: string; mock: boolean; stt: 'elevenlabs' | 'browser' };
+export type Health = {
+  ok: boolean; mode: string; mock: boolean; stt: 'elevenlabs' | 'browser';
+  vision: { calls: number; p50_ms: number | null; p95_ms: number | null; errors: number; dropped: number } | null;
+  guide_max_fps: number;
+};
 export type Profile = { watchlist: { name: string }[]; rooms: string[]; guidance_style: string };
 export type GuideResponse = {
   found: boolean; point: number[] | null; box: number[] | null; angle: number | null; clock: number | null;
@@ -23,6 +27,8 @@ export class Api {
 
   private async json<T>(res: Response): Promise<T> {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // 204 = the backend dropped this frame because Perceptron was still busy; callers get null
+    if (res.status === 204) return null as T;
     return (await res.json()) as T;
   }
 
@@ -53,7 +59,7 @@ export class Api {
     const body = new FormData();
     body.append('frame', frame as unknown as Blob);
     body.append('room', room);
-    return this.send<{ sightings: unknown[] }>('/api/observe', { method: 'POST', body });
+    return this.send<{ sightings: unknown[] } | null>('/api/observe', { method: 'POST', body });
   }
 
   guide(frame: UploadFile, item: string, yawDeg?: number | null) {
@@ -61,7 +67,7 @@ export class Api {
     body.append('frame', frame as unknown as Blob);
     body.append('item', item);
     if (typeof yawDeg === 'number') body.append('yaw_deg', String(yawDeg));
-    return this.send<GuideResponse>('/api/guide', { method: 'POST', body });
+    return this.send<GuideResponse | null>('/api/guide', { method: 'POST', body });
   }
 
   transcribe(audio: UploadFile) {

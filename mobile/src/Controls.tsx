@@ -12,6 +12,7 @@ import { Api, type ChatResponse, type ChatTurn, type GuideResponse, type UploadF
 import { playBeep, prepareBeeps, releaseBeeps } from './beeps';
 import { compensate, panFromAngle, pitchBoost } from './guidance';
 import { getYaw, startOrientation, stopOrientation } from './orientation';
+import { guideIntervalMs, waitMs } from './pacing';
 
 const LOOP_MS = 1000;
 const STALE_MS = 3000;       // silence beeps if the last guide response is older than this
@@ -47,6 +48,7 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
   const history = useRef<ChatTurn[]>([]);
   const guideRef = useRef<{ last: GuideResponse | null; yawAtLast: number | null; at: number }>(
     { last: null, yawAtLast: null, at: 0 });
+  const guideMs = useRef(guideIntervalMs()); // min ms between /api/guide requests (backend GUIDE_MAX_FPS)
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const recording = useRef<{ ready: Promise<boolean>; startedAt: number } | null>(null);
 
@@ -70,6 +72,7 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
         setConnected(true);
         setMock(health.mock);
         setStt(health.stt);
+        guideMs.current = guideIntervalMs(health.guide_max_fps);
         setRooms(profile.rooms);
         setRoom((r) => (profile.rooms.includes(r) ? r : profile.rooms[0] ?? r));
         setStatus(health.stt === 'elevenlabs'
@@ -107,7 +110,8 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
     return () => { cancelled = true; };
   }, [api, connected, guiding, captureFrame]);
 
-  // Guidance: a frame a second to /api/guide, and a fast local loop that plays the beeps.
+  // Guidance: as fast as the backend answers, capped (GUIDE_MAX_FPS), one request in flight and never
+  // queued; plus a fast local loop that plays the beeps and keeps the pan right between answers.
   useEffect(() => {
     if (!guiding) return;
     let cancelled = false;
@@ -118,12 +122,15 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
           const yaw = getYaw();
           const r = await api.guide(await captureFrame(), guiding, yaw);
           if (cancelled) break;
-          guideRef.current = { last: r, yawAtLast: yaw, at: Date.now() };
-          if (r.say) { say(r.say, true); setCue(r.say); }
+          // null = 204: the backend dropped this frame (still busy). Keep the last result.
+          if (r) {
+            guideRef.current = { last: r, yawAtLast: yaw, at: Date.now() };
+            if (r.say) { say(r.say, true); setCue(r.say); }
+          }
         } catch {
           setStatus('Connection problem. Still trying.');
         }
-        await sleep(Math.max(0, LOOP_MS - (Date.now() - t0)));
+        await sleep(waitMs(guideMs.current, Date.now() - t0));
       }
     })();
     (async () => {
