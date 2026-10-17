@@ -17,7 +17,7 @@ Tracks: Community Kitchen (main), Perceptron (our vision API), nebulaONE (a Purp
 
 ## Rules
 - `docs/CONTRACT.md` is the API contract. Keep field names EXACTLY; update the doc when behavior changes.
-- ALL Perceptron calls live in one class in `backend/app/vision.py`. Default is `MockVision` (`PERCEPTRON_MODE=mock`); the repo must always run with no keys. Do not guess SDK signatures: verify against the PyPI page/docs or leave a TODO.
+- ALL Perceptron calls live in one class in `backend/app/vision.py`. Default is `MockVision` (`PERCEPTRON_MODE=mock`; `live` = real Perceptron, one call in flight, errors mean "not seen"); the repo must always run with no keys. Do not guess SDK signatures: verify against the PyPI page/docs or leave a TODO.
 - ALL language-model calls live in `backend/app/llm.py` (default `KeywordLLM`, no keys; any failure falls back to it). Never log tokens, request bodies or model replies. Item/room names from a model are validated against the profile, and location answers come from stored sightings, never the model.
 - ALL speech-to-text provider calls live in `backend/app/stt.py` (default: browser recognition, no keys). Audio is never stored or logged; only the transcript goes on to the LLM.
 - `backend/app/guidance.py` stays pure (no I/O, no clock reads); every function has tests in `backend/tests/test_guidance.py`.

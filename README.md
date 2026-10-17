@@ -79,9 +79,25 @@ ngrok http 5173
 
 Open `https://<your-subdomain>.ngrok-free.app/phone` on the phone. On iPhone, the first press of "Hold to talk" asks for motion-sensor permission. Do not tunnel port 8000.
 
-### Real Perceptron (optional, role A)
+### Real vision with Perceptron (live mode)
+Default is mock (fake detections, no key). To use real Perceptron, add to `.env` (never committed) and restart the backend:
+```
+PERCEPTRON_MODE=live
+PERCEPTRON_API_KEY=...
+# PERCEPTRON_MODEL=            # blank = perceptron-mk1, the id Perceptron's docs confirm
+# GUIDE_MAX_FPS=3              # guidance frames per second per phone; tune after measuring
+```
+`pip install -r backend/requirements.txt` installs the `perceptron` SDK. The frontend never calls Perceptron; the backend owns the key.
 
-Copy `.env.example` to `.env`, set `PERCEPTRON_API_KEY` and `PERCEPTRON_MODE=perceptron`, and `pip install "perceptron>=0.4.0"`. The real client is not implemented yet (`TODO(A)` in `backend/app/vision.py`). The frontend never calls Perceptron; the backend owns the key. Never commit `.env`.
+**Check your key, the coordinates and the latency first** (sends one image to Perceptron):
+```powershell
+cd backend
+.\.venv\Scripts\python scripts\perceptron_probe.py C:\path\to\frame.jpg "red leather wallet"
+.\.venv\Scripts\python scripts\perceptron_probe.py C:\path\to\frame.jpg "red leather wallet" --repeat 20
+```
+It prints the raw box (0-1000 grid), the converted 0..1 box, center x, height, and elapsed time; `--repeat` adds p50/p95.
+
+How live mode behaves: one Perceptron call at a time. A frame that arrives while another is being processed is dropped (the API answers `204`, the phone keeps its last result and local beeps). A timeout (2 s), 429 or any error counts as "not seen" and never crashes a request. The dashboard shows live p50/p95 latency, errors and dropped frames.
 
 ### Natural conversation (optional)
 `POST /api/chat` works out what the user wants from free speech. It runs with **no keys** using keyword matching (`LLM_PROVIDER=mock`, the default). To use a real model, set these in `.env` and restart the backend.

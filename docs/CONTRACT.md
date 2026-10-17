@@ -82,3 +82,15 @@ Everything above is verbatim from the project brief. The items below are what th
 - Errors: **400** empty recording, **413** over 5 MB, **502** the provider failed (auth, quota, 429, timeout, bad response; no provider detail is returned). On any failure the phone says so and switches to browser recognition when the browser has it.
 - Relay: `POST {ELEVENLABS_BASE_URL or https://api.elevenlabs.io/v1}/speech-to-text`, header `xi-api-key`, form fields `model_id` (`ELEVENLABS_STT_MODEL`, blank = `scribe_v2`), `tag_audio_events=false`, `diarize=false`, and `file`. No automatic retries (avoids double charges). Timeout `STT_TIMEOUT_S` (default 10).
 - **Privacy:** audio is held in memory only, sent only to ElevenLabs, never written to disk, never logged, and not forwarded to the LLM (only the transcript is). The transcript is handled like any chat text.
+
+---
+
+# Live vision (added)
+
+- `PERCEPTRON_MODE=mock` (default) or `live`. In live mode `/api/observe` and `/api/guide` call Perceptron (`perceptron` SDK, `detect`) with `classes` = each watched item's description (name if blank). Observe sends all items in one call; guide sends the one item.
+- **Coordinates:** the SDK returns integers on a normalized 0-1000 grid (confirmed in the SDK source, `pointing/types.py`). The backend divides by 1000, clamps to 0..1 and orders the corners, so `box` is `[x1, y1, x2, y2]` in 0..1 as everywhere else. Degenerate boxes are ignored.
+- **One call in flight.** If a frame arrives while Perceptron is still working on another, the endpoint answers **`204 No Content`** with no body and does nothing else (no sighting, no guide state change, no event). Clients treat 204 as "skip": keep the last result and keep the local beeps going. Frames are never queued.
+- **Errors never fail a request.** A timeout (`PERCEPTRON_TIMEOUT_S`, default 2 s), 429, auth error, network error or unparseable reply counts as "not seen" for that frame: `/api/observe` returns no sightings, `/api/guide` returns `found:false` (and the usual "Lost it" cue after 2 s). One warning per minute is logged (error class only).
+- **`confidence`** is a constant `0.8` in live mode: the SDK's box has no confidence field. **`spot`** is `""` in live mode (TODO: needs a second call), so `/api/where` answers "In your bedroom, about 4 minutes ago."
+- `GET /api/health` also returns `vision` (`{calls, p50_ms, p95_ms, errors, dropped}` for the last 200 successful calls, `null` in mock) and `guide_max_fps` (env `GUIDE_MAX_FPS`, default 3, kept within 0.5-10). Clients send at most that many `/api/guide` frames per second, one request at a time. Memory (`/api/observe`) stays at about 1 frame per second.
+- Frames are processed and discarded. Only the item, place, time and a small thumbnail are stored. `video_frames` and streaming endpoints are not used.
