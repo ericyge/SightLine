@@ -113,6 +113,9 @@ ELEVENLABS_API_KEY=...
 ```
 The phone then records a short clip while you hold the button and the backend sends it to ElevenLabs for the transcript, which goes to `/api/chat` and Gemini as before. **The audio leaves your machine to ElevenLabs** (it is not stored or logged). If ElevenLabs fails, the phone falls back to browser recognition. Details: `docs/CONTRACT.md`.
 
+### Native phone app (`mobile/`)
+The Expo app in `mobile/` uses the same backend: camera frames, hold-to-talk, Gemini chat and directional beeps. It needs the backend reachable from the phone (`--host 0.0.0.0` on the same Wi-Fi, or `ngrok http 8000`); see `mobile/README.md`. Untested on real devices.
+
 ## Layout
 
 | Path                       | What                                                                                                                              |

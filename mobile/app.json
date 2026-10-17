@@ -21,12 +21,28 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      ["expo-camera", {
-        "microphonePermission": false,
-        "recordAudioAndroid": false,
-        "cameraPermission": "Allow Sightline to use your camera to help you find everyday objects.",
-        "barcodeScannerEnabled": false
-      }]
+      [
+        "expo-camera",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false,
+          "cameraPermission": "Allow Sightline to use your camera to help you find everyday objects.",
+          "barcodeScannerEnabled": false
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow Sightline to use your microphone so you can ask where your things are."
+        }
+      ],
+      "expo-asset",
+      [
+        "expo-sensors",
+        {
+          "motionPermission": "Allow Sightline to use motion sensors to keep the beeps pointing at your item as you turn."
+        }
+      ]
     ]
   }
 }

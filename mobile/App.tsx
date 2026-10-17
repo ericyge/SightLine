@@ -1,13 +1,15 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AppState, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import Controls from './src/Controls';
 
 export default function App() {
   const [permission, requestPermission, refreshPermission] = useCameraPermissions();
   const [active, setActive] = useState(AppState.currentState === 'active');
   const [error, setError] = useState('');
   const [cameraKey, setCameraKey] = useState(0);
+  const cameraRef = useRef<CameraView>(null);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
@@ -40,6 +42,7 @@ export default function App() {
       <StatusBar hidden />
       {granted && active && !error && (
         <CameraView
+          ref={cameraRef}
           key={cameraKey}
           style={StyleSheet.absoluteFill}
           facing="back"
@@ -48,6 +51,7 @@ export default function App() {
           onMountError={() => setError('Camera unavailable. Please try again.')}
         />
       )}
+      {granted && active && !error && <Controls cameraRef={cameraRef} />}
       {(!granted || error) && (
         <View style={styles.message}>
           <Text style={styles.title} accessibilityRole="header">Sightline</Text>
