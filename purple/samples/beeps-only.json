@@ -1,0 +1,7 @@
+{
+  "watchlist": [
+    {"name": "phone", "description": "white phone in a clear case", "home_spot": "bedroom nightstand"}
+  ],
+  "rooms": ["bedroom", "hallway"],
+  "guidance_style": "beeps_only"
+}

@@ -1,0 +1,11 @@
+{
+  "watchlist": [
+    {"name": "keys", "description": "keys on a bright orange keychain", "home_spot": "kitchen counter"},
+    {"name": "wallet", "description": "red leather wallet", "home_spot": "bedroom desk"},
+    {"name": "phone", "description": "black rectangular phone in a green case", "home_spot": "living room table"},
+    {"name": "glasses", "description": "black rimmed glasses", "home_spot": "bedroom nightstand"},
+    {"name": "medication", "description": "white pill bottle with a blue cap", "home_spot": "kitchen counter"}
+  ],
+  "rooms": ["bedroom", "kitchen", "living room"],
+  "guidance_style": "clock_face"
+}

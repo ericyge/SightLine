@@ -1,0 +1,9 @@
+{
+  "watchlist": [
+    {"name": "keys", "description": "silver keys on a blue lanyard", "home_spot": "kitchen counter"},
+    {"name": "medication", "description": "orange pill bottle with a white cap", "home_spot": "kitchen counter"},
+    {"name": "water bottle", "description": "tall steel water bottle", "home_spot": "kitchen table"}
+  ],
+  "rooms": ["kitchen"],
+  "guidance_style": "left_right"
+}
