@@ -1,0 +1,16 @@
+.env
+.venv/
+.tmp/
+__pycache__/
+*.py[cod]
+generated/
+*.wav
+*.mp3
+*.pcm
+*.ogg
+*.flac
+*.m4a
+models/*
+!models/README.md
+*.onnx
+*.tflite
