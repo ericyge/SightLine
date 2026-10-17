@@ -2,7 +2,7 @@
 
 ## Start every new chat with repository context
 - Before planning or editing in a new chat for this repository, read this file, the root `README.md`, and `SUMMARY.md` if it exists.
-- Then read `docs/README.md` and every other Markdown document under `docs/`, including subdirectories. Start with `PROJECT_OVERVIEW.md`, `CONTRACT.md`, `ROLES.md`, and `VISION.md`; discover any additional files rather than relying only on this list.
+- Then read `docs/README.md` and every other Markdown document under `docs/`, including subdirectories. Start with `PROJECT_OVERVIEW.md`, `CONTRACT.md`, `ROLES.md`, `VISION.md`, and `MEMORY.md`; discover any additional files rather than relying only on this list.
 - Read the actual file contents using file tools; filenames and links alone do not load their contents into context. If a required document is missing or cannot be read, state that limitation rather than claiming it was loaded.
 - Use these documents to understand current behavior, interfaces, ownership, setup, and unfinished work. Distinguish planned features and prior test results from behavior verified in the current chat. The user's current instructions take precedence.
 - Re-read relevant documents after a context reset if their contents are no longer available. Update affected docs whenever implementation, setup, or contract behavior changes so the next chat receives accurate context.
@@ -26,11 +26,19 @@ Tracks: Community Kitchen (main), Perceptron (our vision API), nebulaONE (a Purp
 
 ## Vision implementation status
 - The real adapter, structured labels, optional item reference photos, video importer, and benchmark are implemented in `backend/app/vision/`. Both API routes use the same adapter; retain the package exports in `vision/__init__.py`.
-- Default mode is still mock. The last backend verification during implementation passed 89 tests without provider calls. A first real 7.82-second clip produced eight successful Mk1.5 responses and five sightings; median inference was 469.9 ms. Authentication and structured-output acceptance work for that model/clip. Broader accuracy, model comparisons, and phone latency remain unverified; do not present mock timings as real results.
+- Default mode is still mock. The latest automatic place assignment implementation passed 150 backend tests without provider calls. A first real 7.82-second clip produced eight successful Mk1.5 responses and five sightings; median inference was 469.9 ms. Authentication and structured-output acceptance work for that model/clip. Broader accuracy, live auto-place evaluation, model comparisons, and phone latency remain unverified; do not present mock timings as real results.
 - Real detections use `confidence: null`, with corresponding API types and a migration preserving existing SQLite sightings. Never invent a confidence score.
 - Frames are prepared in memory via `backend/app/frames.py`. Provider boxes use 0..1000 internally and 0..1 in the app. Invalid uploads return 422/413; provider failures return 503 instead of a successful empty detection list.
 - Video import uses a supplied room and recording start time plus frame timestamps. It saves sightings and thumbnail crops, not extracted full frames, and does not publish live dashboard events. It currently adds duplicates on re-import; dedupe/throttling remains unfinished.
 - See `docs/VISION.md` for exact commands, configuration, reference-photo manifests, and remaining validation.
+
+## Location memory status
+- `backend/app/memory/` (`store.py`, `models.py`, `api.py`, `cli.py`, `observation.py`) and `backend/app/vision/places.py` support taught and automatically discovered SQLite places, text landmarks, directed connections, and per-sighting automatic or manual assignments. See `docs/MEMORY.md`.
+- Sightings include stable `id`, nullable `place_id`, `place_source` (`"none"|"manual"|"automatic"`), and `place_reason`. `/api/where` includes `destination` from the newest sighting only. Never carry forward an older destination over a newer unassigned observation or treat profile `home_spot` as evidence.
+- By default (`auto_place=true`), `/api/observe` and `vision.cli video` infer per-object resting places and open-vocabulary everyday objects (prioritizing watchlist items plus cups, water bottles, mugs, remotes, bags, canes, etc.) in one structured request (`vision.observe`), matching a candidate place or creating an `auto_<hex>` place when at least two distinct fixed landmarks are visible, and leaving ambiguous/carried items with `place_id: null` (`place_source: "none"`). `room` is optional (`"unknown room"` fallback). `/api/where` and `/api/guide` also accept any open-vocabulary object on demand.
+- Optional explicit `place_id` on observation/video ingestion bypasses automatic place inference and assigns every detected object to that taught place (`place_source: "manual"`). Use `--no-auto-places` or `auto_place=false` to disable automatic place assignment.
+- Camera localization/facing (without a watched object), route planning, obstacle checks, and ElevenLabs are not implemented. Existing `/api/guide` remains local visible-object guidance.
+- Use the user's existing root `venv/`; do not create `backend/.venv`. Memory CLIs need no provider calls. Keep mock and real databases separate.
 
 ## Rules
 - `docs/CONTRACT.md` is the API contract. Keep field names EXACTLY; update the doc when behavior changes.
@@ -49,12 +57,13 @@ Tracks: Community Kitchen (main), Perceptron (our vision API), nebulaONE (a Purp
 - Keep the summary current, distinguish your changes from pre-existing work, and never include credentials or secrets. Updating `SUMMARY.md` itself does not require another summary.
 
 ## Commands (PowerShell, from repo root)
-- Backend: `cd backend; .\.venv\Scripts\python -m uvicorn app.main:app --reload --port 8000`
-- Tests: `cd backend; .\.venv\Scripts\python -m pytest`
+- Backend: `cd backend; ..\venv\Scripts\python -m uvicorn app.main:app --reload --port 8000`
+- Tests: `cd backend; ..\venv\Scripts\python -m pytest`
 - Frontend: `cd web; npm run dev` (build check: `npm run build`)
 
 ## Commands (macOS/Linux, from repo root)
-- Backend: `cd backend && .venv/bin/python -m uvicorn app.main:app --reload --port 8000`
-- Tests: `cd backend && .venv/bin/python -m pytest -q`
-- Vision tools: `cd backend && .venv/bin/python -m app.vision.cli --help`
+- Backend: `cd backend && ../venv/bin/python -m uvicorn app.main:app --reload --port 8000`
+- Tests: `cd backend && ../venv/bin/python -m pytest -q`
+- Vision tools: `cd backend && ../venv/bin/python -m app.vision.cli --help`
+- Memory tools: `cd backend && ../venv/bin/python -m app.memory.cli --help`
 - Frontend: `cd web && npm run dev` (build check: `npm run build`)

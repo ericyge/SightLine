@@ -6,13 +6,15 @@ import os
 import statistics
 import sys
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import av
 from dotenv import load_dotenv
 
-from .. import db
+from .. import db, memory
+from ..memory.observation import observe_and_save
 from . import MockVision, PerceptronVision, VisionUnavailable
 from .video import sample_video
 
@@ -37,18 +39,16 @@ def _vision(args, model=None):
 
 def ingest(args) -> int:
     """Process sequentially with bounded memory; emit one JSON record per frame."""
+    memory.validate_place(args.place_id, args.room)
     vision = _vision(args)
-    items = db.list_items()
+    session_id = uuid.uuid4().hex
     try:
         for offset, jpeg in sample_video(args.video, fps=args.fps, max_px=args.size, limit=args.limit):
             ts = (args.started_at + timedelta(seconds=offset)).isoformat()
-            begin = time.perf_counter()
-            labels = vision.detect(jpeg, items, args.room)
-            elapsed = time.perf_counter() - begin
-            sightings = [db.add_sighting(d.item, args.room, d.spot, d.box, d.confidence,
-                                        ts, db.save_thumb(jpeg, d.box)) for d in labels]
+            sightings, inference_ms = observe_and_save(vision, jpeg, args.room, ts,
+                place_id=args.place_id, auto_place=not args.no_auto_places, session_id=session_id)
             print(json.dumps({"mock": vision.mock, "offset_seconds": round(offset, 6), "ts": ts,
-                              "inference_ms": round(elapsed * 1000, 1), "sightings": sightings}),
+                              "inference_ms": inference_ms, "sightings": sightings}),
                   flush=True)
     finally:
         vision.close()
@@ -62,10 +62,10 @@ def benchmark(args) -> int:
         raise ValueError(f"Need {args.count} sampled frames; this video provided {len(frames)}.")
     items = db.list_items()
     if args.task == "guide":
-        name = db.resolve_item(args.item)
-        if name is None:
-            raise ValueError("Guidance benchmark item must be on the watchlist.")
-        items = [db.get_item(name)]
+        target = db.target_item(args.item)
+        if target is None:
+            raise ValueError("Guidance benchmark item must be a valid object name.")
+        items = [target]
     models = args.models or [os.getenv("PERCEPTRON_MODEL", "perceptron-mk1.5")]
     failed = False
     for model in models:
@@ -114,7 +114,9 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--size", type=int, default=int(os.getenv("VISION_FRAME_MAX_PX", "640")))
         command.add_argument("--mock", action="store_true", help="Use fake detections; make no API calls")
         if name == "video":
-            command.add_argument("--room", required=True, help="Room label for this single-room clip")
+            command.add_argument("--room", help="Optional room label for a single-room clip; omit for automatic inference")
+            command.add_argument("--place-id", help="Taught destination of ALL detected items in this clip; omit for a room scan")
+            command.add_argument("--no-auto-places", action="store_true", help="Save detections without inferring places")
             command.add_argument("--started-at", required=True, type=started_at)
             command.add_argument("--limit", type=int)
         else:

@@ -5,6 +5,7 @@
 
 /**
  * @typedef {Object} Sighting
+ * @property {number} id           stable saved sighting ID
  * @property {string} item
  * @property {string} room
  * @property {string} spot
@@ -12,6 +13,18 @@
  * @property {number|null} confidence  null when the provider supplies no calibrated score
  * @property {string} ts           ISO timestamp
  * @property {string} thumb        URL path, e.g. /api/thumbs/abc.jpg ("" if none)
+ * @property {string|null} place_id taught destination; null when unassigned
+ * @property {"none"|"manual"|"automatic"} place_source automatic assignments are provisional inferences
+ * @property {string} place_reason evidence summary or why the place was left unresolved
+ */
+
+/**
+ * @typedef {Object} Place
+ * @property {string} id
+ * @property {string} name
+ * @property {string} room
+ * @property {string} description
+ * @property {string[]} landmarks
  */
 
 /**
@@ -20,6 +33,7 @@
  * @property {boolean} found
  * @property {{room:string, spot:string, minutes_ago:number, thumb:string, confidence:number|null}|null} last
  * @property {Sighting[]} history   up to 5
+ * @property {Place|null} destination   newest sighting's taught place, not a route
  * @property {string} say
  */
 

@@ -57,9 +57,42 @@ def test_recorded_video_reaches_where_with_original_times(client, clip, capsys):
     assert not list(clip.parent.glob("*.jpg"))
 
 
+def test_video_automatically_discovers_and_reuses_places_without_room(client, clip, capsys):
+    assert main(["video", str(clip), "--mock", "--started-at", "2026-10-17T12:00:00-07:00"]) == 0
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    wallets = [next(s for s in row["sightings"] if s["item"] == "wallet") for row in rows]
+    assert len({s["place_id"] for s in wallets}) == 1
+    assert all(s["place_source"] == "automatic" for s in wallets)
+    assert len(client.get("/api/memory/map").json()["places"]) == 2
+
+
+def test_video_can_disable_automatic_places(client, clip, capsys):
+    assert main(["video", str(clip), "--mock", "--no-auto-places", "--limit", "1",
+                 "--started-at", "2026-10-17T12:00:00-07:00"]) == 0
+    row = json.loads(capsys.readouterr().out)
+    assert all(s["place_id"] is None for s in row["sightings"])
+    assert client.get("/api/memory/map").json()["places"] == []
+
+
 def test_video_requires_timezone(clip):
     with pytest.raises(SystemExit):
         main(["video", str(clip), "--room", "bedroom", "--started-at", "2026-10-17T12:00:00"])
+
+
+def test_video_can_attach_known_place_and_rejects_unknown_before_inference(client, clip, capsys, monkeypatch):
+    from app.vision import cli
+    place = {"id": "desk", "name": "desk", "room": "bedroom", "description": "Beside the bed."}
+    assert client.post("/api/memory/map", json={"places": [place]}).status_code == 200
+    args = ["video", str(clip), "--mock", "--room", "bedroom", "--limit", "1",
+            "--started-at", "2026-10-17T12:00:00-07:00", "--place-id", "desk"]
+    assert main(args) == 0
+    assert all(s["place_id"] == "desk" for s in json.loads(capsys.readouterr().out)["sightings"])
+    assert client.get("/api/where?item=wallet").json()["destination"]["id"] == "desk"
+    def unexpected(*args):
+        pytest.fail("Invalid place must be rejected before creating a model client")
+    monkeypatch.setattr(cli, "_vision", unexpected)
+    assert main(args[:-1] + ["missing"]) == 1
+    assert "Unknown place" in capsys.readouterr().err
 
 
 def test_benchmark_is_labeled_mock_and_does_not_save_sightings(client, clip, capsys):

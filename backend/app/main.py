@@ -17,7 +17,10 @@ from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
 
-from . import db, guidance  # noqa: E402
+from . import db, guidance, memory  # noqa: E402
+from .memory.api import router as memory_router  # noqa: E402
+from .memory.models import PlaceID  # noqa: E402
+from .memory.observation import UNKNOWN_ROOM, observe_and_save  # noqa: E402
 from .events import broadcaster  # noqa: E402
 from .models import (GuideResponse, HealthResponse, ObserveResponse, OkResponse, Profile,  # noqa: E402
                      WhereLast, WhereResponse)
@@ -46,6 +49,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Sightline", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.include_router(memory_router)
+
+
+@app.exception_handler(memory.MemoryNotFound)
+@app.exception_handler(memory.MemoryConflict)
+async def memory_error(request: Request, exc: ValueError):
+    status = 404 if isinstance(exc, memory.MemoryNotFound) else 409
+    return JSONResponse(status_code=status, content={"detail": str(exc)})
 
 
 @app.exception_handler(VisionUnavailable)
@@ -109,6 +120,8 @@ def ago_phrase(minutes: float) -> str:
 def where_say(room: str, spot: str, minutes_ago: float) -> str:
     """Spoken answer for /where."""
     place = f"In your {room}, {spot}" if spot else f"In your {room}"
+    if room == UNKNOWN_ROOM:
+        place = f"Last seen {spot}" if spot else "Last seen in an unidentified place"
     ago = ago_phrase(minutes_ago)
     return f"{place}, {ago}." if ago != "just now" else f"{place}, just now."
 
@@ -146,19 +159,19 @@ def post_profile(profile: Profile):
 
 
 @app.post("/api/observe", response_model=ObserveResponse)
-async def observe(request: Request, frame: UploadFile = File(...), room: str = Form(...),
-                  ts: str | None = Form(None)):
+async def observe(request: Request, frame: UploadFile = File(...), room: str | None = Form(None, max_length=160),
+                  ts: str | None = Form(None), place_id: PlaceID | None = Form(None),
+                  auto_place: bool = Form(True), session_id: PlaceID | None = Form(None)):
     """Find watched items in a frame and save each sighting (frame is discarded)."""
+    await run_in_threadpool(memory.validate_place, place_id, room)
     data = await read_frame(frame)
     try:
         when = _parse_ts(ts).astimezone(timezone.utc).isoformat() if ts else _now_iso()
     except ValueError:
         raise HTTPException(422, "ts must be an ISO timestamp.") from None
     # TODO(A): skip saving when an item hasn't moved since its last sighting (dedupe / throttle).
-    detections = await run_in_threadpool(
-        get_vision().detect, data, db.list_items(), room, _mock_hints(request))
-    sightings = [db.add_sighting(d.item, room, d.spot, d.box, d.confidence, when,
-                                 db.save_thumb(data, d.box)) for d in detections]
+    sightings, _ = await run_in_threadpool(observe_and_save, get_vision(), data, room, when,
+        place_id=place_id, auto_place=auto_place, session_id=session_id, hints=_mock_hints(request))
     broadcaster.publish(_event("sighting", sightings=sightings, frame=_frame_data_url(data)))
     return {"sightings": sightings}
 
@@ -171,15 +184,19 @@ async def where(item: str):
     if not history:
         label = name or item.strip().lower()
         text = (f"I haven't seen your {label} yet." if name
-                else f"I'm not watching for {label}.")
+                else "Please tell me which item you're looking for.")
         broadcaster.publish(_event("say", text=text, source="where"))
         return WhereResponse(item=label, found=False, say=text)
     last = history[0]
+    destination = memory.destination_for(last)
     minutes = max(0.0, (datetime.now(timezone.utc) - _parse_ts(last["ts"])).total_seconds() / 60)
     text = where_say(last["room"], last["spot"], minutes)
+    if destination:
+        room_phrase = f" in your {destination['room']}" if destination["room"] != UNKNOWN_ROOM else ""
+        text = f"Last seen at {destination['name']}{room_phrase}, {ago_phrase(minutes)}."
     broadcaster.publish(_event("say", text=text, source="where"))
     return WhereResponse(
-        item=name, history=history, say=text,
+        item=name, history=history, destination=destination, say=text,
         last=WhereLast(room=last["room"], spot=last["spot"], minutes_ago=round(minutes, 1),
                        thumb=last["thumb"], confidence=last["confidence"]))
 
@@ -189,12 +206,17 @@ async def guide(request: Request, frame: UploadFile = File(...), item: str = For
                 yaw_deg: float | None = Form(None)):
     """One guidance step: locate the item in this frame and return pan/clock/beep info."""
     data = await read_frame(frame)
-    name = db.resolve_item(item)
-    if name is None:
-        return GuideResponse(found=False, say=f"I'm not watching for {item.strip().lower()}.")
-    detections = await run_in_threadpool(
-        get_vision().detect, data, [db.get_item(name)], None, _mock_hints(request))
-    box = next((d.box for d in detections if d.item == name), None)
+    target = db.target_item(item)
+    if target is None:
+        return GuideResponse(found=False, say="Please tell me which item to find.")
+    name = target["name"]
+    vision = get_vision()
+    hints = _mock_hints(request)
+    if vision.mock and not target["watched"] and not hints and not db.recent_sightings(name, 1):
+        detections = []
+    else:
+        detections = await run_in_threadpool(vision.detect, data, [target], None, hints)
+    box = next((d.box for d in detections if (db.canonicalize_item(d.item) or d.item) == name), None)
     now = time.monotonic()
     state = _guide_states.get(name)
     if state is None or now - state.touched > GUIDE_STATE_TTL_S:

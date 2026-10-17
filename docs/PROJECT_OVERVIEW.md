@@ -11,7 +11,7 @@ An audio-first companion that uses a phone camera (head or chest mounted; glasse
 
 **Why it is different:** Ray-Ban Meta and Google Astra answer about what the camera sees now. Sightline keeps persistent memory over hours and actively steers the user, and it is designed for blind users first (voice in, audio out, large touch targets).
 
-**Privacy:** only sightings are stored (item, place, time, small thumbnail). Video is never stored, and each frame is discarded after processing.
+**Privacy:** structured sightings, taught places/landmarks/connections, and small object crops are stored. The pipeline never saves video or full frames; each processed frame is discarded.
 
 **Out of scope:** real glasses hardware, face recognition, outdoor navigation.
 
@@ -26,7 +26,8 @@ voice "find X" ─────── /api/guide ───► vision.detect ─�
 gyroscope yaw keeps the pan correct between server responses
 ```
 
-- **Vision** is isolated in one class, `backend/app/vision/vision.py`. Mock mode (the default) fakes detections so the whole app runs with no API key. The real client, reference-photo support, recorded-video ingestion, and benchmark commands are implemented and tested offline; real accuracy and latency await API credentials. See `docs/VISION.md`.
+- **Vision** is isolated in one class, `backend/app/vision/vision.py`. Mock mode (the default) fakes detections so the whole app runs with no API key. The real client, reference-photo support, recorded-video ingestion, and benchmark commands are implemented; a first real clip succeeded. See `docs/VISION.md`.
+- **Location memory** saves taught and automatically discovered places, text landmarks, and directed connections in SQLite. Each sighting can be linked automatically (`place_source: "automatic"`, using at least two visible fixed landmarks per object) or manually (`place_source: "manual"`) to a stable place; `/api/where` returns that destination from the newest sighting. Teach/assign/query using the memory API or CLI without additional vision calls. See `docs/MEMORY.md`.
 - **Guidance math** is a set of pure, unit-tested functions in `backend/app/guidance.py`: pixel position becomes an angle, then a clock hour, a distance bucket, a stereo pan and a beep interval.
 - **The frontend** is React + Vite with plain CSS. It uses browser APIs only: camera, Web Audio, speech synthesis and recognition, device orientation. It never calls Perceptron, because the backend owns the API key.
 
@@ -56,9 +57,11 @@ the phone page, and dashboard. The real Perceptron adapter is now implemented wi
 labels and optional item reference photos. Recorded-video import creates searchable sightings
 using recording timestamps, and benchmark commands measure the same frames across candidate models.
 
-The last backend verification during implementation passed **89 tests** without live provider
+The latest automatic place assignment implementation passed **150 tests** without live provider
 calls. Coverage includes the installed SDK over an offline HTTP transport, label validation,
-API integration, database migration, image preparation, and generated-video ingestion. This is
+API integration, database migration, image preparation, generated-video ingestion, taught maps,
+automatic per-object place discovery and landmark matching, manual place assignments,
+persistence, and recall of the newest destination. This is
 a recorded result from that implementation, not a fresh test run on every documentation edit.
 
 For integration, real detections have `confidence: null`; successful empty results retain previous
@@ -70,8 +73,17 @@ The first live Mk1.5 clip test succeeded: eight sampled frames, five sightings (
 keys), median inference 469.9 ms, and no errors. Saved object crops were visually checked.
 See [VISION.md](VISION.md) for the output file and the limits of this small trial.
 
-Still pending: broader real-prop accuracy and latency benchmarks, model comparisons,
-dedupe/throttling, on-device speech/audio/gyroscope verification, and the Purple agent.
+Location memory now supports both taught places and automatic per-object place discovery/matching
+(`observation.py`, `vision/places.py`) alongside directed connections needed for future
+room-to-room navigation. The phone defaults its room selector to `Automatic` and sends a
+`session_id` so observations automatically resolve per-object places when at least two fixed
+landmarks are visible, while keeping ambiguous or carried sightings unassigned (`place_id: null`).
+No route or current camera position is inferred from the saved map.
+
+Still pending: live Perceptron verification of automatic place discovery/matching, current
+camera position/facing recognition, route planning, obstacle checks, ElevenLabs speech,
+broader real-prop accuracy and latency benchmarks, model comparisons, dedupe/throttling,
+on-device speech/audio/gyroscope verification, and the Purple agent.
 Recorded-video import uses a user-supplied room, adds duplicates if rerun, and does not stream
 dashboard events. The real Layer 0 demo is not yet verified. See [VISION.md](VISION.md) and
 [ROLES.md](ROLES.md).
@@ -83,5 +95,6 @@ dashboard events. The real Layer 0 demo is not yet verified. See [VISION.md](VIS
 - [CONTRACT.md](CONTRACT.md): API contract and how the scaffold resolves open details
 - [ROLES.md](ROLES.md): who owns what, TODOs, checkpoints
 - [VISION.md](VISION.md): implemented vision pipeline, video import, credentials, and benchmarks
+- [MEMORY.md](MEMORY.md): taught places, landmarks, directed connections, and object destinations
 - [AGENTS.md](../AGENTS.md): repository instructions and new-chat context loading
 - [CLAUDE.md](../CLAUDE.md): conventions for Claude Code sessions

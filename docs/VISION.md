@@ -15,17 +15,22 @@ with [the documentation index](README.md), as required by `AGENTS.md`.
 From the repository root, on macOS/Linux:
 
 ```bash
+source venv/bin/activate
+python -m pip install -r backend/requirements.txt
 cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
+export PERCEPTRON_MODE=mock
+export DB_PATH=sightline-mock.db
+export THUMBS_DIR=thumbs/mock
 python -m pytest -q
 python -m uvicorn app.main:app --reload --port 8000
 ```
 
-The current checkout already has an installed `backend/.venv`. On Windows, activate with
-`.\.venv\Scripts\Activate.ps1`. Default mode is `mock`; no API key or network request is
-needed to exercise the pipeline. Mock labels do not reflect image contents.
+The current checkout uses the existing root `venv`. On a fresh checkout only, create it with
+`python3 -m venv venv`. On Windows, activate `venv\Scripts\Activate.ps1` from the repo root
+and use `$env:NAME='value'` for the environment overrides. Do not create `backend/.venv`.
+Mock labels do not reflect image contents. After testing, stop the mock server and unset these
+three overrides before using `.env` for real trials (`unset PERCEPTRON_MODE DB_PATH THUMBS_DIR`
+on macOS/Linux). A shell override takes precedence over `.env`.
 
 ## First milestone: one recorded room becomes memory
 
@@ -49,6 +54,17 @@ saves small object crops. It reads your existing video without copying it or sav
 frames. Import is sequential and does not queue requests or publish live WebSocket events.
 Do not mix mock and real evaluation data: use a fresh `DB_PATH`/`THUMBS_DIR` for real trials.
 Importing the same video twice currently adds a second set of sightings.
+
+Sightings now include a stable `id`, nullable `place_id`, `place_source` (`"none"`,
+`"manual"`, or `"automatic"`), and `place_reason`. By default, `video` and `/api/observe`
+run automatic per-object place assignment (`vision.observe`), matching each detected object
+against candidate places in scope or creating a new `auto_<hex>` place when at least two
+distinct fixed landmarks support it (`--room` is optional). Pass `--no-auto-places` (or
+`auto_place=false`) to disable automatic place inference. Optional `--place-id` manually
+assigns every detected object to a taught place in the supplied room, so use it only for a
+focused capture of one surface. See [MEMORY.md](MEMORY.md) for saved places/landmarks,
+manual assignment without reprocessing, and recall through `python -m app.memory.cli where wallet`.
+No server is needed for that query.
 
 Start the backend and query:
 

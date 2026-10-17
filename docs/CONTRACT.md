@@ -7,14 +7,22 @@ live in [VISION.md](VISION.md).
 Stored records:
   item:     { name, aliases[], description }
   room:     { name }
-  sighting: { item, room, spot, box:[x1,y1,x2,y2] (0..1), confidence (number|null), ts (ISO), thumb (path) }
+  sighting: { id (integer), item, room, spot, box:[x1,y1,x2,y2] (0..1), confidence (number|null), ts (ISO), thumb (path), place_id (string|null), place_source ("none"|"manual"|"automatic"), place_reason (string) }
+  place: { id, name, room, description, landmarks:[string...] }
+  connection: { from_place_id, to_place_id, departure_view, instruction, arrival_view }
 
 Endpoints:
-  POST /api/observe   multipart: frame (JPEG), room (string), ts (optional ISO)
+  POST /api/observe   multipart: frame (JPEG), room (optional string), ts (optional ISO), place_id (optional taught place ID), auto_place (optional bool, default true), session_id (optional PlaceID string)
       -> { sightings: [sighting...] }   saves sightings found in this frame, pushes an event to /ws/events
   GET  /api/where?item=wallet
-      -> { item, found:true, last: { room, spot, minutes_ago, thumb, confidence }, history: [ ... up to 5 ... ], say: "In your bedroom, on the desk, next to the lamp, about 4 minutes ago." }
-      -> HTTP 200 { item, found:false, last:null, history:[], say:"I haven't seen your wallet yet." } if watched but never seen
+      -> { item, found:true, last: { room, spot, minutes_ago, thumb, confidence }, history: [ ... up to 5 ... ], destination: place|null, say: "In your bedroom, on the desk, next to the lamp, about 4 minutes ago." }
+      -> HTTP 200 { item, found:false, last:null, history:[], destination:null, say:"I haven't seen your wallet yet." } if watched but never seen
+  GET  /api/memory/map -> { places:[place...], connections:[connection...] }
+  POST /api/memory/map JSON: { places:[place...], connections:[connection...] }
+      -> full merged map; omitted records retained, no deletions
+  GET  /api/memory/items -> [{ item, last:sighting|null, destination:place|null }...] for current watchlist
+  PUT  /api/memory/sightings/{sighting_id}/place JSON: { place_id:string|null }
+      -> updated sighting; null clears only this link
   POST /api/guide     multipart: frame (JPEG), item (string), yaw_deg (optional float)
       -> { found, point:[x,y], box:[x1,y1,x2,y2], angle, clock, distance ("far"|"near"|"reach"), pan, say, beep_ms }
       e.g. { "found": true, "point": [0.71, 0.62], "box": [0.66,0.55,0.77,0.69], "angle": 13.7, "clock": 12, "distance": "near", "pan": 0.46, "say": "Wallet slightly right, almost in reach", "beep_ms": 350 }
@@ -22,6 +30,63 @@ Endpoints:
       -> { ok:true }  stores the watchlist/rooms/style that the Purple setup agent produces
   GET  /api/profile   -> current profile (default watchlist: keys, wallet, phone, glasses, medication; rooms: bedroom, kitchen, living room)
   WS   /ws/events     server pushes JSON events: {type:"sighting"|"guide"|"say", ...payload}
+
+## Location memory semantics
+
+`place_id` is the observed object's destination, not the camera position.
+By default (`auto_place=true` and no explicit `place_id`), `/api/observe` and video import
+ask the vision model for per-object resting-place evidence alongside detections in a single
+structured request (`vision.observe`). Each detected object can either:
+- match an existing place in scope when at least two supplied fixed landmarks are visibly
+  matched and uniquely distinguish that candidate (`place_source: "automatic"`),
+- create a new discovered place (`auto_<hex>`) when at least two distinct fixed landmarks,
+  a name, and a description are visible and do not overlap two or more landmarks of an
+  existing place (`place_source: "automatic"`), or
+- remain unassigned (`place_id: null`, `place_source: "none"`, with an explanatory
+  `place_reason`) if carried, obscured, ambiguous, or conflicting within the frame. Object
+  detections are still saved when place evidence is unresolved.
+
+Supplying an explicit `place_id` on `/observe` or video import bypasses automatic place
+inference, applies that taught place to every detected item in the frame/clip
+(`place_source: "manual"`), and fills `room` from the taught place when `room` is omitted.
+Setting `auto_place=false` (or `--no-auto-places` on the CLI) disables automatic place
+inference and saves unassigned sightings (`place_source: "none"`). Manual assignment or
+clearing can also be done per sighting afterwards via `PUT /api/memory/sightings/{id}/place`
+or `memory_cli assign`. Old databases migrate automatically: existing IDs, timestamps, boxes,
+and thumbnails survive, existing `place_id` links get `place_source: "manual"`, and unlinked
+sightings start with `place_id: null`, `place_source: "none"`, `place_reason: ""`.
+Re-importing a video still adds duplicates.
+
+`room` is optional on `/api/observe` and video import. When supplied, it limits candidate
+places to that room and overrides any model-inferred room label. When omitted, the matched
+place's room, the model-inferred room, or `"unknown room"` is used. `session_id` (matching
+the `PlaceID` pattern) optionally scopes up to 8 recent observations from the last 20 seconds
+as continuity hints for the model.
+
+`destination` always comes from the newest sighting. If that sighting is unassigned, it is null
+even if an older sighting had a place. Empty detections preserve last-seen memory. `found:true`
+means seen previously, not currently visible or confirmed still there. Profile `home_spot`
+never substitutes for an observation. Historical observations are sorted by timestamp instant,
+with sighting ID breaking ties; new writes use UTC. The latest sighting ID is in `history[0].id`.
+
+Places can be explicitly taught or automatically discovered from object sightings; connections
+are always explicitly taught, directed, and do not imply a reverse path.
+`departure_view` and `arrival_view` store the facing/view context for that direction.
+Map updates are atomic merges, not replacements. A place ID cannot change rooms. Profile
+updates retain places and sightings; only currently watched items are returned by item lookup.
+There is no route planning, live camera localization, obstacle detection, or ElevenLabs integration yet.
+
+Validation: place IDs match `[a-z0-9][a-z0-9_-]{0,79}`; names/rooms/landmarks are nonblank,
+trimmed strings up to 160 characters; descriptions/view context/instructions are nonblank,
+trimmed strings up to 1000 characters. A place accepts at most 20 landmarks (defaults empty).
+Each import accepts up to 100 places and 500 connections (both default empty), with no duplicate
+IDs/edges, self-connections, or unknown endpoints. Extra fields in map/assignment JSON are rejected.
+Unknown referenced place or sighting: 404. Room mismatch or attempting to move a stable place ID
+to another room: 409. Malformed JSON/model validation: 422. Errors use `{detail: ...}`.
+Room matching ignores case and surrounding whitespace. Invalid observation assignments are
+rejected before provider calls or saved crops. Memory edits do not publish WebSocket events.
+
+See [MEMORY.md](MEMORY.md) for a complete mock test and assignment of earlier real sightings.
 
 ## Guidance math (implement in guidance.py as pure, unit-tested functions)
 - angle_deg(x, fov_h) = (x - 0.5) * fov_h        (x in 0..1, left to right; FOV default 65 from env FOV_H_DEGREES)
@@ -47,9 +112,9 @@ The notes below specify additional behavior; update both when behavior changes.
 - **Vision failures:** HTTP 503 `{detail: ...}` for provider errors, timeouts, incomplete replies, or invalid labels. No sightings are saved for a failed frame. A successful empty list means no current detection, and never deletes previous sightings. The client never falls back to mock on an error.
 - **Timestamps:** new `/api/observe` timestamps are normalized to UTC; invalid ISO timestamps return 422. The video importer requires a recording start time with a zone and adds each frame's presentation offset. Existing naive API timestamps are still treated as UTC.
 
-- **`/api/where` never returns HTTP 404.** Never-seen is `200 {item, found:false, last:null, history:[], say:"I haven't seen your wallet yet."}`. An item not on the watchlist is also `found:false` with `say:"I'm not watching for X."`. Found responses include `found:true`.
-- **`/api/where` `say` wording:** `"In your bedroom, on the desk, next to the lamp, about 4 minutes ago."` (room + spot as stored). `history` entries are full sighting records, newest first. `minutes_ago` is a float.
-- **`item` matching:** names and aliases are case-insensitive; "my"/"the" prefixes and a trailing plural "s" are ignored ("my meds" -> medication).
+- **`/api/where` never returns HTTP 404.** Never-seen is `200 {item, found:false, last:null, history:[], destination:null, say:"I haven't seen your wallet yet."}` for both profile watchlist items and open-vocabulary objects (e.g. `"water bottle"`, `"cup"`). Found responses include `found:true`.
+- **`/api/where` `say` wording:** unassigned sightings retain `"In your bedroom, on the desk, next to the lamp, about 4 minutes ago."` (room + spot), or `"Last seen on the desk, next to the lamp, about 4 minutes ago."` when `room` is `"unknown room"`. Assigned sightings use `"Last seen at counter beside the sink in your kitchen, about 4 minutes ago."` (omitting `"in your unknown room"` when the place's room is `"unknown room"`). `history` entries are full sighting records, newest first. `minutes_ago` is a float.
+- **`item` matching & open-vocabulary:** names, watchlist aliases, and common everyday object synonyms (`cup`/`mug`/`coffee cup`/`tumbler`, `water bottle`/`bottle`/`thermos`, `bag`/`backpack`/`purse`, `headphones`/`earbuds`/`airpods`, `cane`/`white cane`, etc.) are case-insensitive; `"my"`/`"the"`/`"a"`/`"an"` prefixes and a trailing plural `"s"` are ignored (`"my meds"` -> `medication`, `"my mug"` -> `cup`, `"my bottle"` -> `water bottle`). `/api/observe` detects both watchlist items and any other visible everyday personal/household objects on surfaces, and `/api/guide` can guide to any item on demand.
 - **`thumb`** is a URL path served by the backend: `/api/thumbs/<id>.jpg` (96 px max crop around the box). It is `""` if the frame could not be decoded.
 - **`/api/guide` when not found:** `found:false`, `point/box/angle/clock/distance` are `null`, `pan` 0, `beep_ms` 0 (silence). `say` is `""` until the item has been missing for 2 s, then `"Lost it. Turn slowly left."` once.
 - **`/api/guide` `say`** is `""` when the direction has not changed since the last cue (server tracks this per item; a pause longer than 10 s starts a fresh session). The returned `angle` is smoothed against the previous angle if it was seen within 3 s.

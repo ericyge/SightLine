@@ -14,7 +14,9 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from .. import db
 from ..frames import prepare_frame
+from .places import PLACE_PROMPT, PlaceEvidence
 
 log = logging.getLogger("sightline.vision")
 
@@ -26,6 +28,7 @@ class Detection:
     box: list[float]
     confidence: float | None
     spot: str = ""
+    location: PlaceEvidence | None = None
 
 
 class VisionClient(ABC):
@@ -35,6 +38,11 @@ class VisionClient(ABC):
 
     def close(self) -> None:
         """Release any provider connections."""
+
+    def observe(self, frame: bytes, items: list[dict], room: str | None, context: dict,
+                hints: dict | None = None) -> list[Detection]:
+        """Legacy adapters can still detect without assigning an unsupported place."""
+        return self.detect(frame, items, room, hints)
 
     @abstractmethod
     def detect(self, frame: bytes, items: list[dict], room: str | None = None,
@@ -48,13 +56,16 @@ class VisionClient(ABC):
 
 # ---- mock -------------------------------------------------------------------------------
 
-MOCK_BASE_X = {"wallet": 0.3, "keys": 0.62, "phone": 0.45, "glasses": 0.2, "medication": 0.78}
+MOCK_BASE_X = {"wallet": 0.3, "keys": 0.62, "phone": 0.45, "glasses": 0.2, "medication": 0.78,
+               "cup": 0.36, "water bottle": 0.68}
 MOCK_SPOTS = {
     "wallet": "on the desk, next to the lamp",
     "keys": "on the counter, next to the fruit bowl",
     "phone": "on the table, next to the remote",
     "glasses": "on the nightstand, next to the book",
     "medication": "on the shelf, next to the kettle",
+    "cup": "on the desk, next to the laptop",
+    "water bottle": "on the counter, next to the sink",
 }
 MOCK_BOX_W = 0.10
 MOCK_BOX_H = 0.15
@@ -75,6 +86,22 @@ class MockVision(VisionClient):
 
     def __init__(self) -> None:
         self._calls = 0
+
+    def observe(self, frame, items, room, context, hints=None):
+        detections = self.detect(frame, items, room, hints)
+        for d in detections:
+            # Deliberately fake fixtures; never derived from the pixels or used in real mode.
+            surface = "desk" if d.item in {"wallet", "glasses"} else "counter"
+            name = f"demo {surface}"
+            landmarks = [f"Mock fixed window above the {surface}",
+                         f"Mock built-in cupboard beside the {surface}"]
+            matches = [p for p in context["places"] if p["name"] == name and p["landmarks"] == landmarks]
+            candidate = matches[0] if len(matches) == 1 else None
+            d.location = PlaceEvidence(decision="match" if candidate else "new", local_key=surface,
+                candidate_id=candidate["id"] if candidate else None, name=name, room=room or "demo room",
+                description=f"Fake {surface} with fixed mock landmarks.", landmarks=landmarks,
+                matched_landmarks=[0, 1] if candidate else [], reason="Mock place evidence; not image recognition.")
+        return detections
 
     def detect(self, frame: bytes, items: list[dict], room: str | None = None,
                hints: dict | None = None) -> list[Detection]:
@@ -121,6 +148,15 @@ class _Label(BaseModel):
 class _Labels(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     detections: list[_Label] = Field(max_length=50)
+
+
+class _LocatedLabel(_Label):
+    location: PlaceEvidence | None
+
+
+class _LocatedLabels(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    detections: list[_LocatedLabel] = Field(max_length=50)
 
 
 SYSTEM_PROMPT = """You label visible personal objects for Sightline.
@@ -188,12 +224,21 @@ class PerceptronVision(VisionClient):
 
     def detect(self, frame: bytes, items: list[dict], room: str | None = None,
                hints: dict | None = None) -> list[Detection]:
-        if not items:
+        return self._detect(frame, items, room)
+
+    def observe(self, frame, items, room, context, hints=None):
+        return self._detect(frame, items, room, context)
+
+    def _detect(self, frame, items, room, place_context=None):
+        located = place_context is not None
+        if not items and not located:
             return []
         from perceptron import SDKError, image
         names = {item["name"] for item in items}
-        schema = _Labels.model_json_schema()
-        schema["$defs"]["_Label"]["properties"]["item"]["enum"] = sorted(names)
+        result_model = _LocatedLabels if located else _Labels
+        schema = result_model.model_json_schema()
+        if not located:
+            schema["$defs"]["_Label"]["properties"]["item"]["enum"] = sorted(names)
         content = []
         for name in sorted(names):
             for photo in self._references.get(name, []):
@@ -201,15 +246,18 @@ class PerceptronVision(VisionClient):
         context = {"task": "memory" if room is not None else "guidance", "room": room,
                    "watchlist": [{"name": item["name"], "description": item.get("description", "")}
                                  for item in items]}
+        if located:
+            context.update(task="memory", room_hint=room, open_vocabulary=True, **place_context)
         content.extend([json.dumps(context), "Current camera frame:", image(frame)])
         try:
             reply = self._client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "system", "content": SYSTEM_PROMPT},
+                messages=[{"role": "system", "content": PLACE_PROMPT if located else SYSTEM_PROMPT},
                           {"role": "user", "content": content}],
                 response_format={"type": "json_schema", "json_schema": {
-                    "name": "sightline_detections", "strict": True, "schema": schema}},
-                temperature=0, max_completion_tokens=2048,
+                    "name": "sightline_observations" if located else "sightline_detections",
+                    "strict": True, "schema": schema}},
+                temperature=0, max_completion_tokens=4096 if located else 2048,
             )
         except SDKError:
             # Provider exceptions can contain request contents. Never log or relay them.
@@ -217,16 +265,26 @@ class PerceptronVision(VisionClient):
         if not reply.complete or reply.finish_reason != "stop" or not reply.text:
             raise VisionUnavailable("Perceptron returned an incomplete response; try another frame.")
         try:
-            labels = _Labels.model_validate_json(reply.text).detections
+            labels = result_model.model_validate_json(reply.text).detections
         except ValidationError:
             raise VisionUnavailable("Perceptron returned invalid labels; this frame was not saved.") from None
         seen = set()
+        out = []
         for label in labels:
-            if label.item not in names or label.item in seen:
-                raise VisionUnavailable("Perceptron returned unknown or duplicate item labels.")
-            seen.add(label.item)
-        return [Detection(label.item, [n / 1000 for n in label.box], None, label.spot.strip())
-                for label in labels]
+            if located:
+                item_name = db.canonicalize_item(label.item, items)
+                if not item_name:
+                    raise VisionUnavailable("Perceptron returned invalid labels; this frame was not saved.")
+                if item_name in seen:
+                    continue
+            else:
+                item_name = label.item
+                if item_name not in names or item_name in seen:
+                    raise VisionUnavailable("Perceptron returned unknown or duplicate item labels.")
+            seen.add(item_name)
+            out.append(Detection(item_name, [n / 1000 for n in label.box], None, label.spot.strip(),
+                                 getattr(label, "location", None)))
+        return out
 
 
 # ---- factory ----------------------------------------------------------------------------

@@ -3,10 +3,11 @@
 Four owners, one file area each, so merges stay quiet. Search the code for `TODO(A)` .. `TODO(D)` to find where to start. The repo runs in mock mode with no keys; build on that.
 
 ## A: Vision and Memory
-**Owns:** `backend/app/vision/`, `backend/app/frames.py`, `backend/app/db.py`, `/api/observe`, `/api/where`.
-Real Perceptron client, prompts + JSON schemas, in-context photos of each item, room tagging.
+**Owns:** `backend/app/vision/`, `backend/app/memory/`, `backend/app/frames.py`, `backend/app/db.py`, `/api/observe`, `/api/where`, `/api/memory/*`.
+Real Perceptron client, prompts + JSON schemas, in-context photos of each item, room tagging, automatic and manual place assignment.
 
-**NEXT TASK:** the first real Mk1.5 clip run confirmed authentication and structured-output
+**NEXT TASK:** verify automatic place discovery/matching and manual assignments on real clips with [MEMORY.md](MEMORY.md),
+then implement matching current camera views to places for user localization/facing. Memory and automatic per-object place assignment are persistent, but camera localization and navigation are not implemented. The first real Mk1.5 clip run confirmed authentication and structured-output
 acceptance (eight frames, five sightings, no errors). Next list candidate account models and
 measure median/p95 latency on 20 real 640px phone frames. Start with `perceptron-mk1.5`;
 compare `isaac-0.3-fast` only if available and compatible. Prepare the results for the teammate
@@ -15,12 +16,17 @@ Targets: memory about 1/sec, guidance under 1.2 s round trip. The CLI benchmark 
 upload and audio playback, so measure the full guidance loop separately on the phone.
 
 - [ ] Live model acceptance and latency: 20 real 640px frames per supported candidate; record medians/p95 and failures
-- [x] Implement `PerceptronVision.detect`; installed SDK tested with offline HTTP responses
+- [x] Implement `PerceptronVision.detect` and `observe`; installed SDK tested with offline HTTP responses
 - [x] Verify `image(bytes)` and message API; use explicit JSON boxes and labeled reference images
-- [x] Prompts + JSON schema for item + spot ("on the desk, next to the lamp")
+- [x] Prompts + JSON schema for item + spot ("on the desk, next to the lamp") and per-object `PlaceEvidence`
 - [x] Support local reference-photo manifests (actual item photos and accuracy testing still needed)
-- [x] User-supplied room tags through the existing phone flow and video importer
-- [ ] Automatic room recognition (stretch)
+- [x] User-supplied and optional automatic room tags through the phone flow and video importer
+- [x] Persistent taught and automatically discovered places, text landmarks, directed connections, and per-sighting destination links (`place_source`, `place_reason`)
+- [x] Automatic per-object place discovery and landmark matching during `/api/observe` and video ingestion
+- [x] Memory API/CLI, automatic legacy migration, and newest-sighting destination recall
+- [ ] Match current camera views to taught places and determine camera position/facing
+- [ ] Route selection and live arrival/obstacle checks with B/C
+- [ ] Automatic room recognition (live Perceptron verification)
 - [x] Recorded-video importer and latency benchmark tooling; tested offline
 - [ ] Dedupe/throttle sightings so the timeline is not spammed
 - [ ] Layer 0: recorded video becomes memory, "where" answers aloud
@@ -32,6 +38,9 @@ and other model compatibility remain unverified; the Layer 0 checklist above ref
 Integration notes for B/C: real `confidence` is nullable; provider failures are HTTP 503,
 not `found:false`; boxes refer to the prepared upright frame. The importer writes memory but
 does not publish WebSocket events. Keep mock trials in a separate database from real trials.
+Sightings now include `id` and `place_id`; `/where` adds a nullable `destination` place.
+An unmapped newest sighting returns null even when an older one was mapped. Connections
+are stored instructions, not a verified route from the user's current position.
 
 ## B: Guidance and Audio
 **Owns:** `backend/app/guidance.py`, `/api/guide`, `web/src/phone/audio.js`, `speech.js`, `orientation.js`.
@@ -42,6 +51,7 @@ Beep engine, spatial pan, gyroscope smoothing. Stretch: hand guidance with Media
 - [ ] Verify yaw sign and drift on real iPhone and Android (`orientation.js` is unverified on devices)
 - [ ] Tune speech cadence; confirm "speak only on change" feels right
 - [ ] Voice command phrasing in `parseCommand`
+- [ ] ElevenLabs speech for confirmed navigation cues once localization/routing exists
 - [ ] Stretch: MediaPipe Hands final-reach guidance
 
 ## C: App and Dashboard
@@ -53,6 +63,7 @@ Beep engine, spatial pan, gyroscope smoothing. Stretch: hand guidance with Media
 - [ ] Dashboard timeline backfill on load (needs a small list endpoint) and repeat collapsing
 - [ ] Dashboard readable from 3 m away (judge-facing)
 - [ ] Integration: full flow memory -> where -> guide -> reach (Layer 2)
+- [ ] Place teaching/assignment UI and current-location handoff; phone currently sends only a room
 
 ## D: Purple, Product and Pitch
 **Owns:** `purple/` folder, the Purple "Sightline Setup" agent (3 questions in, profile JSON out; POST the result to `/api/profile`), LinkedIn post, Devpost, demo script, props, backup video, outreach to a blind user.
