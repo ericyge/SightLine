@@ -7,6 +7,8 @@ Audio-first AI companion for blind and low-vision people. A phone camera does tw
 
 Frames are discarded after processing; only item/place/time/thumbnail are stored. It runs end to end in **mock mode with no API keys**.
 
+For the full picture (problem, architecture, team, tracks, status) read [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md).
+
 ## Quickstart (PowerShell, about 2 minutes)
 
 Needs Python 3.11+ and Node 18+. Two terminals, from the repo root.
@@ -62,6 +64,7 @@ Copy `.env.example` to `.env`, set `PERCEPTRON_API_KEY` and `PERCEPTRON_MODE=per
 | `web/src/phone/` | Phone UI, beep engine, speech, gyroscope, API wrappers |
 | `web/src/dashboard/` | Judge-facing live dashboard |
 | `purple/` | Purple agent text files (instructions, knowledge, sample profile) |
+| `docs/PROJECT_OVERVIEW.md` | Problem, architecture, team, tracks, status |
 | `docs/CONTRACT.md` | API contract + how the scaffold resolves open details |
 | `docs/ROLES.md` | Who owns what, TODO checklists, checkpoints |
 
