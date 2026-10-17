@@ -58,9 +58,17 @@ Open `https://<your-subdomain>.ngrok-free.app/phone` on the phone. On iPhone, th
 Copy `.env.example` to `.env`, set `PERCEPTRON_API_KEY` and `PERCEPTRON_MODE=perceptron`, and `pip install "perceptron>=0.4.0"`. The real client is not implemented yet (`TODO(A)` in `backend/app/vision.py`). The frontend never calls Perceptron; the backend owns the key. Never commit `.env`.
 
 ### Natural conversation (optional)
-`POST /api/chat` works out what the user wants from free speech. It runs with **no keys** using keyword matching (`LLM_PROVIDER=mock`, the default). To use a real model, set these in `.env` and restart the backend:
+`POST /api/chat` works out what the user wants from free speech. It runs with **no keys** using keyword matching (`LLM_PROVIDER=mock`, the default). To use a real model, set these in `.env` and restart the backend.
+
+Provider order is **purple -> gemini -> keyword**. The chain starts at `LLM_PROVIDER` and falls through the later ones on any error, 3 s timeout or missing key, always ending at keyword matching. The dashboard log shows which one answered (`purple`, `gemini`, `keyword_fallback`, `mock`).
 ```
-# Purple (needs API access)
+# Gemini (Google AI Studio key; uses Google's OpenAI-compatible endpoint)
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=...
+GEMINI_MODEL=...            # see Google's "OpenAI compatibility" docs; model names change
+# GEMINI_BASE_URL is optional (blank = Google's documented endpoint)
+
+# Purple (needs API access); with LLM_PROVIDER=purple the chain is purple -> gemini -> keyword
 LLM_PROVIDER=purple
 PURPLE_API_TOKEN=...
 PURPLE_MODEL=...            # list ids: cd backend; .\.venv\Scripts\python -m app.llm models
@@ -69,7 +77,7 @@ PURPLE_MODEL=...            # list ids: cd backend; .\.venv\Scripts\python -m ap
 LLM_PROVIDER=openai_compat
 LLM_BASE_URL=...  LLM_API_KEY=...  LLM_MODEL=...
 ```
-If the model errors or takes over 3 seconds, the app answers with keyword matching and the dashboard log shows `keyword_fallback`. Details: `docs/CONTRACT.md`.
+Privacy: only your words, the last 6 turns, and item/alias/room names go to a provider, never camera frames, thumbnails or sighting history. Details: `docs/CONTRACT.md`.
 
 ## Layout
 | Path | What |

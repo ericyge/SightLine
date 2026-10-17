@@ -60,10 +60,12 @@ Everything above is verbatim from the project brief. The items below are what th
       -> { intent:"find"|"where"|"stop"|"set_room"|"chitchat", item?, room?, say, provider }
   WS event: {type:"chat", user_text, intent, item, say, provider, mock}
 
-- `text` is 1 to 500 characters. `provider` is `mock` (keyword matching, the default), `purple`, `openai_compat`, or `keyword_fallback` (the configured model failed or took over 3 s).
+- `text` is 1 to 500 characters. `provider` is whichever answered: `mock` (keyword matching, the default), `purple`, `gemini`, `openai_compat`, or `keyword_fallback` (every configured provider failed, timed out or had no key).
+- **Provider order: purple -> gemini -> keyword.** The chain starts at `LLM_PROVIDER` and falls through the later providers on any error, timeout (3 s) or missing key; it always ends at keyword matching. `LLM_PROVIDER=purple` tries purple, gemini, keyword. `gemini` tries gemini, keyword. `mock` and `openai_compat` do not use gemini. A provider with no key configured is skipped without a request.
+- **Privacy, all external providers:** only the user's transcribed text, the last 6 turns, and watchlist names, aliases and room names (plus the current room) are sent. Never camera frames, thumbnails, descriptions, home spots or sighting history. Keys, Authorization headers and request bodies are never logged.
 - The backend asks a model (tool calling: `find_item`, `where_is_item`, `stop_guidance`, `set_room`) what the user wants. **`item` and `room` are validated against the stored profile** (names, aliases, rooms). An unknown item or room becomes `intent:"chitchat"` with one short question in `say`.
 - **`say` for find / where / stop / set_room is written by the app, never the model.** For `where` it is exactly the `GET /api/where` answer built from stored sightings. Only `chitchat` speaks model text (collapsed whitespace, 200 characters max).
 - `find` means "start guidance for `item`"; the phone then calls `/api/guide`. "I can't find my keys" maps to `find`, not `where`.
 - `/api/chat` does not publish a separate `say` event (the `chat` event is the log entry). Chat text lives only in memory and the live event; nothing is written to the database.
-- Config (see `.env.example`): `LLM_PROVIDER=mock|purple|openai_compat`, `PURPLE_API_BASE`, `PURPLE_API_TOKEN`, `PURPLE_MODEL`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, optional `LLM_TIMEOUT_S` (default 3).
+- Config (see `.env.example`): `LLM_PROVIDER=mock|purple|gemini|openai_compat`; `PURPLE_API_BASE`, `PURPLE_API_TOKEN`, `PURPLE_MODEL`; `GEMINI_API_KEY`, `GEMINI_BASE_URL` (blank = Google's documented OpenAI-compatible endpoint), `GEMINI_MODEL`; `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`; optional `LLM_TIMEOUT_S` (default 3).
 - The phone calls `/api/chat` first and falls back to its fixed-phrase matching if the request fails.
