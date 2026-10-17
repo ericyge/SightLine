@@ -8,6 +8,7 @@ import {
 
 const FRAME_WIDTH = 640;
 const LOOP_MS = 1000;
+const CHAT_HISTORY_TURNS = 6; // matches the backend limit
 const STALE_MS = 3000; // silence beeps if the last guide response is older than this
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -59,6 +60,7 @@ export default function Phone() {
   const roomRef = useRef(room);
   const guideRef = useRef({ last: null, yawAtLast: null, at: 0 });
   const stopListenRef = useRef(null);
+  const historyRef = useRef([]); // last chat turns; kept in memory only
   roomRef.current = room;
 
   useEffect(() => {
@@ -130,7 +132,8 @@ export default function Phone() {
     speak("Stopped", { interrupt: true, force: true });
   }, []);
 
-  const runCommand = useCallback(async (text) => {
+  // Fixed-phrase handling. Used when /api/chat is unreachable so the demo never breaks.
+  const runLegacyCommand = useCallback(async (text) => {
     const cmd = parseCommand(text);
     if (!cmd) {
       setStatus(`Heard "${text}". Try "where's my wallet" or "find my keys".`);
@@ -152,6 +155,24 @@ export default function Phone() {
       speak(`Looking for your ${cmd.item}`, { force: true });
     }
   }, [stopGuidance]);
+
+  // Natural speech: the backend decides the intent; on any failure fall back to fixed phrases.
+  const runCommand = useCallback(async (text) => {
+    let r;
+    try {
+      r = await api.chat(text, historyRef.current, roomRef.current);
+    } catch {
+      return runLegacyCommand(text);
+    }
+    const turn = (role, content) => ({ role, content: content.slice(0, 500) });
+    historyRef.current = [...historyRef.current, turn("user", text), turn("assistant", r.say)]
+      .slice(-CHAT_HISTORY_TURNS);
+    if (r.intent === "stop") return stopGuidance();
+    if (r.intent === "find" && r.item) setGuiding(r.item);
+    if (r.intent === "set_room" && r.room) setRoom(r.room);
+    setStatus(r.say);
+    speak(r.say, { force: true });
+  }, [runLegacyCommand, stopGuidance]);
 
   async function unlock() {
     unlockAudio();

@@ -44,14 +44,27 @@
  */
 
 /**
+ * POST /api/chat response.
+ * @typedef {Object} ChatResponse
+ * @property {"find"|"where"|"stop"|"set_room"|"chitchat"} intent
+ * @property {string|null} item    set for find / where
+ * @property {string|null} room    set for set_room
+ * @property {string} say          always what to speak
+ * @property {string} provider     "mock" | "purple" | "openai_compat" | "keyword_fallback"
+ */
+
+/**
  * WebSocket /ws/events payloads. Every event also has `mock: boolean`.
  * @typedef {Object} SightlineEvent
- * @property {"sighting"|"guide"|"say"} type
+ * @property {"sighting"|"guide"|"say"|"chat"} type
  * @property {boolean} mock
  * @property {Sighting[]} [sightings]  type "sighting"
  * @property {string|null} [frame]     data URL of the latest frame (sighting / guide)
  * @property {string} [text]           type "say"
  * @property {string} [source]         type "say": "where" | "guide"
+ * @property {string} [user_text]      type "chat": what the user said
+ * @property {string} [intent]         type "chat"
+ * @property {string} [provider]       type "chat"
  */
 
 export {};

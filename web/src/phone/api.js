@@ -15,6 +15,20 @@ export const postProfile = (profile) =>
     body: JSON.stringify(profile),
   }).then(json);
 
+const CHAT_TIMEOUT_MS = 4000; // backend gives the model 3 s; this guards a dead server
+
+/** Ask the backend what the user wants. history: last turns as {role, content}. */
+export function chat(text, history, currentRoom) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), CHAT_TIMEOUT_MS);
+  return fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, history, current_room: currentRoom }),
+    signal: ctl.signal,
+  }).then(json).finally(() => clearTimeout(timer));
+}
+
 export const where = (item) => fetch(`/api/where?item=${encodeURIComponent(item)}`).then(json);
 
 /** @param {Blob} frame JPEG */

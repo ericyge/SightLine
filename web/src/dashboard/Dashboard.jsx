@@ -98,6 +98,8 @@ export default function Dashboard() {
         boxes: ev.found ? [{ box: ev.box, label: ev.item }] : [],
         arrow: ev.found ? { point: ev.point, angle: ev.angle, clock: ev.clock, distance: ev.distance } : null,
       }));
+    } else if (ev.type === "chat") {
+      setLog((l) => [{ text: ev.say, source: "chat", user: ev.user_text, provider: ev.provider, at: Date.now() }, ...l].slice(0, MAX_LOG));
     } else if (ev.type === "say") {
       setLog((l) => [{ text: ev.text, source: ev.source, at: Date.now() }, ...l].slice(0, MAX_LOG));
     }
@@ -138,7 +140,11 @@ export default function Dashboard() {
         <ul className="log" aria-live="polite">
           {log.length === 0 && <li className="muted">Nothing spoken yet.</li>}
           {log.map((l, i) => (
-            <li key={i}><span className="src">{l.source}</span> “{l.text}”</li>
+            <li key={i}>
+              {l.user && <div className="muted">You: “{l.user}”</div>}
+              <span className="src">{l.source}</span> “{l.text}”
+              {l.provider && <span className="prov">{l.provider}</span>}
+            </li>
           ))}
         </ul>
       </section>

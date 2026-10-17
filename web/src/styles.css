@@ -66,6 +66,8 @@ a { color: var(--accent); font-size: 1.5rem; }
 .log li { font-size: 1.4rem; }
 .src { color: var(--accent); font-size: 0.9rem; text-transform: uppercase; margin-right: 0.4rem; }
 
+.prov { margin-left: 0.6rem; padding: 0.1rem 0.5rem; border: 2px solid var(--muted); border-radius: 0.4rem; color: var(--muted); font-size: 0.9rem; }
+
 @media (max-width: 900px) {
   .dash { grid-template-columns: 1fr; grid-template-areas: "head" "main" "side" "log"; }
 }
