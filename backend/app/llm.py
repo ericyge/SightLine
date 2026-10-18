@@ -100,12 +100,23 @@ class LLMClient(ABC):
 # ---- keyword (default, no network) -------------------------------------------------------
 
 _NOISE = re.compile(r"\b(please|for me|right now|again)\b")
-_STOP = re.compile(r"^(stop|cancel|never ?mind|that'?s enough|i got it|got it|i found it)\b")
+_STOP = re.compile(
+    r"\b("
+    r"stop(?:ped|ping| guiding| guidance)?|"
+    r"cancel|"
+    r"never ?mind|"
+    r"that'?s enough|"
+    r"all good|i'?m good|"
+    r"done|"
+    r"(?:i(?:'ve| have)? )?(?:got|found|have|grabbed|reached|picked up) (?:it|them|that|the [a-z0-9 ]+|my [a-z0-9 ]+)"
+    r")\b"
+)
 _ROOM = re.compile(r"\b(?:i'?m|i am|we'?re|we are) (?:now )?in (?:the |my )?([a-z ]+)$")
 _WHERE = re.compile(r"\b(?:where(?:'?s| is| are| did i (?:put|leave|last see|last have))"
-                    r"|have you seen|when did i last see)\s+(.+)")
+                    r"|have you seen|when did i last see|show me where)\s+(.+)")
 _FIND = re.compile(r"\b(?:can'?t find|cannot find|couldn'?t find|can not find|guide me to|take me to"
-                   r"|lead me to|help me find|look for|search for|find)\s+(.+)")
+                   r"|lead me to|walk me to|bring me to|direct me to|point me to|how do i get to"
+                   r"|help me find|look for|search for|locate|find)\s+(.+)")
 _THANKS = re.compile(r"\b(thanks|thank you|cheers)\b")
 HELP_TEXT = "Try: where's my wallet, or find my keys."
 

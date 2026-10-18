@@ -9,9 +9,9 @@
 //    "cached" = ElevenLabs only for audio the server already has, "never" = built-in.
 //  - Starting any speech silences BOTH engines first (stopAll), so two voices never overlap.
 
-export const REPLY_TIMEOUT_MS = 2500;      // backend allows ElevenLabs 3 s; a slower reply is not worth waiting for
-export const CUE_CACHED_TIMEOUT_MS = 600;  // cached-only lookups are local to the server, so they must be fast
-export const CUE_FETCH_TIMEOUT_MS = 1500;  // "always" mode: a cue that takes longer than this is stale anyway
+export const REPLY_TIMEOUT_MS = 4500;      // give ElevenLabs enough time for full sentence replies
+export const CUE_CACHED_TIMEOUT_MS = 800;  // cached-only lookups are local to the server, so they must be fast
+export const CUE_FETCH_TIMEOUT_MS = 4000;  // "always" mode: let ElevenLabs synthesize uncached cues without premature Apple TTS fallback
 export const REPEAT_MS = 4000;             // identical guidance cues inside this window are dropped
 export const MAX_REPLY_WAIT_MS = 12000;    // a stuck reply must not silence guidance forever
 

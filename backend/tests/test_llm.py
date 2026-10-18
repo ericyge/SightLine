@@ -57,6 +57,10 @@ def purple_env(monkeypatch):
     ("find the medication please", "find_item", {"item": "medication"}),
     ("stop", "stop_guidance", {}),
     ("never mind", "stop_guidance", {}),
+    ("i got the wallet", "stop_guidance", {}),
+    ("i got my wallet", "stop_guidance", {}),
+    ("got the keys", "stop_guidance", {}),
+    ("i found the phone", "stop_guidance", {}),
     ("I'm in the kitchen", "set_room", {"room": "kitchen"}),
 ])
 def test_keyword_tool_calls(text, tool, args):

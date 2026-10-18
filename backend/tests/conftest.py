@@ -37,6 +37,9 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     from fastapi.testclient import TestClient
     from app import main, vision
+    # main.load_dotenv must not leave a developer .env in force for this client.
+    monkeypatch.setenv("PERCEPTRON_MODE", "mock")
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
     vision.reset_vision()
     main._guide_states.clear()
     main._navigate_states.clear()

@@ -100,11 +100,19 @@ def test_say_cues_are_short():
 
 
 def test_navigate_say_only_on_change():
-    text, key = g.navigate_say("Walk forward", "a->b", None)
-    assert text == "Walk forward" and key == "a->b"
-    assert g.navigate_say("Walk forward", "a->b", key) == ("", "a->b")
-    text2, key2 = g.navigate_say("Turn right", "b->c", key)
+    text, key, spoken_at = g.navigate_say("Walk forward", "a->b", None)
+    assert text == "Walk forward" and key == "a->b" and spoken_at == 0.0
+    assert g.navigate_say("Walk forward", "a->b", key) == ("", "a->b", 0.0)
+    text2, key2, _ = g.navigate_say("Turn right", "b->c", key)
     assert text2 == "Turn right" and key2 == "b->c"
+
+
+def test_navigate_say_repeats_after_interval():
+    text, key, at = g.navigate_say("Turn left", "hop:left", None, now=1.0, last_spoken_at=0.0)
+    assert text == "Turn left" and key == "hop:left" and at == 1.0
+    assert g.navigate_say("Turn left", "hop:left", key, now=5.0, last_spoken_at=at) == ("", key, at)
+    again, key2, at2 = g.navigate_say("Turn left", "hop:left", key, now=16.0, last_spoken_at=at)
+    assert again == "Turn left" and key2 == key and at2 == 16.0
 
 
 def test_compute_guide_found_matches_contract_example():

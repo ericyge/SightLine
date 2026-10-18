@@ -123,11 +123,12 @@ def test_explicit_room_hint_limits_candidates_and_wins_over_inferred_room(client
     assert bad["place_id"] is None
 
 
-def test_newer_carried_object_does_not_inherit_old_destination(client, jpeg):
-    save(client, jpeg, evidence())
+def test_newer_carried_object_falls_back_to_older_mapped_destination(client, jpeg):
+    first = save(client, jpeg, evidence())
     last = save(client, jpeg, None, ts="2026-10-17T20:00:00Z")
     answer = client.get("/api/where?item=wallet").json()
-    assert answer["destination"] is None and answer["history"][0]["id"] == last["id"]
+    assert answer["destination"]["id"] == first["place_id"] and answer["history"][0]["id"] == last["id"]
+    assert answer["history"][0]["place_id"] is None
     assert len(memory.get_map()["places"]) == 1
 
 

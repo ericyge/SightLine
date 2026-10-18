@@ -71,11 +71,13 @@ place's room, the model-inferred room, or `"unknown room"` is used. `session_id`
 the `PlaceID` pattern) optionally scopes up to 8 recent observations from the last 20 seconds
 as continuity hints for the model.
 
-`destination` always comes from the newest sighting. If that sighting is unassigned, it is null
-even if an older sighting had a place. Empty detections preserve last-seen memory. `found:true`
-means seen previously, not currently visible or confirmed still there. Profile `home_spot`
-never substitutes for an observation. Historical observations are sorted by timestamp instant,
-with sighting ID breaking ties; new writes use UTC. The latest sighting ID is in `history[0].id`.
+`destination` is the newest assigned place among recent sightings of the item. If the newest
+sighting is unassigned but an older one still has a place, that older place is used for
+routing and guidance. If none of the recent sightings are assigned, `destination` is null.
+Empty detections preserve last-seen memory. `found:true` means seen previously, not currently
+visible or confirmed still there. Profile `home_spot` never substitutes for an observation.
+Historical observations are sorted by timestamp instant, with sighting ID breaking ties; new
+writes use UTC. The latest sighting ID is in `history[0].id`.
 
 Places can be explicitly taught or automatically discovered from object sightings; connections
 are saved by map teaching or the recorded-video walkthrough mapper. They are directed and do
@@ -84,14 +86,14 @@ not imply a reverse path. Return travel requires separately saved connections fo
 Map updates are atomic merges, not replacements. A place ID cannot change rooms. Profile
 updates retain places and sightings; only currently watched items are returned by item lookup.
 `/api/guide` localizes the camera against taught places and plans a directed BFS route when the
-target item is not visible and the newest sighting has a destination. Facing is checked against the next recorded departure view before speaking a walking instruction.
+target item is not visible and a navigable destination exists. Facing is checked against the next recorded departure view before speaking a walking instruction.
 Continuous obstacle avoidance is not implemented. Speech support is described in the text-to-speech section below.
 
 `/api/memory/directions` and CLI `directions` return `status` of `ok`, `already_there`,
 `item_not_seen`, `unknown_destination`, `unknown_current`, or `no_path`. `found` means a
-sighting exists, not that a route exists. Only the newest sighting's saved `place_id` supplies
-the destination: neither an older assignment, a place name in `spot`, a generic surface name,
-nor a sole mapped place in the room substitutes for it. `from_place` must identify a known
+sighting exists, not that a route exists. The destination is the newest assigned `place_id`
+among recent sightings; a place name in `spot`, a generic surface name, or a sole mapped place
+in the room never invents an assignment. `from_place` must identify a known
 place to get directions; omitted, empty, or unknown IDs yield `unknown_current` when the
 destination is known. Map order never establishes the user's location. These read-only
 endpoints do not perform camera localization; `/api/guide` does.
@@ -144,11 +146,11 @@ The notes below specify additional behavior; update both when behavior changes.
 - **`item` matching & open-vocabulary:** names, watchlist aliases, and common everyday object synonyms (`cup`/`mug`/`coffee cup`/`tumbler`, `water bottle`/`bottle`/`thermos`, `bag`/`backpack`/`purse`, `headphones`/`earbuds`/`airpods`, `cane`/`white cane`, etc.) are case-insensitive; `"my"`/`"the"`/`"a"`/`"an"` prefixes and a trailing plural `"s"` are ignored (`"my meds"` -> `medication`, `"my mug"` -> `cup`, `"my bottle"` -> `water bottle`). `/api/observe` detects both watchlist items and any other visible everyday personal/household objects on surfaces, and `/api/guide` can guide to any item on demand.
 - **`thumb`** is a URL path served by the backend: `/api/thumbs/<id>.jpg` (96 px max crop around the box). It is `""` if the frame could not be decoded.
 - **`/api/guide` modes:**
-  - **visual:** target item is in the current frame. Existing pan/clock/beep guidance; `mode:"visual"`. `destination` is filled from the newest sighting when assigned. `current_place` and `next_instruction` are null (localization is skipped to save a provider call).
-  - **navigate:** item not visible, destination known, current place localized, and a directed path exists (or the user is already at the destination). `found:false`, geometry null, `beep_ms` 0. `say` / `next_instruction` use the next taught connection instruction only after facing is aligned; otherwise `say` asks for an in-place scan/turn or a stop and `next_instruction` is null. Speak when the hop or facing status changes. At the destination without a visible item: `say` like `"You're at counter beside the sink. Look around slowly."` with `next_instruction` null.
-  - **lost:** cannot offer visual or navigate cues. An unassigned newest sighting gives `"I last saw your wallet, but couldn't identify its place. Please slowly scan your surroundings."` once per sighting/session, with `destination` and `next_instruction` null. Failed localization asks the user to slowly scan, with the remembered destination retained. A missing directed path reports that no path is known. No walking instruction or beeps are returned for these cases; a later resolved route speaks its next cue again.
+  - **visual:** target item is in the current frame. Existing pan/clock/beep guidance; `mode:"visual"`. `destination` is the navigable (newest assigned) place when one exists. `current_place` and `next_instruction` are null (localization is skipped to save a provider call).
+  - **navigate:** item not visible, destination known, current place localized, and a directed path exists (or the user is already at the destination). `found:false`, geometry null, `beep_ms` 0. `say` / `next_instruction` use the next taught connection instruction only after facing is aligned; otherwise `say` asks for an in-place scan/turn or a stop and `next_instruction` is null. Speak when the hop or facing status changes, and re-prompt the same cue about every 8 s while it remains active. At the destination without a visible item: `say` like `"You're at counter beside the sink. Look around slowly."` with `next_instruction` null.
+  - **lost:** cannot offer visual or navigate cues. When no recent sighting is assigned: `"I last saw your wallet, but couldn't identify its place. Please slowly scan your surroundings."` (re-prompted about every 8 s), with `destination` and `next_instruction` null. Failed localization asks the user to slowly scan, with the remembered destination retained. A missing directed path reports that no path is known. No walking instruction or beeps are returned for these cases; a later resolved route speaks its next cue again. When the newest sighting is unassigned but an older one is mapped, `/api/where` `say` keeps the newest room/spot wording and appends that it can guide to the last mapped place.
 - **`/api/guide` when not found (visual-lost, no destination / no saved sightings):** `found:false`, `point/box/angle/clock/distance` are `null`, `pan` 0, `beep_ms` 0 (silence). `say` is `""` until the item has been missing for 2 s, then `"Lost it. Turn slowly left."` or `"Lost it. Turn slowly right."` once. **Which way:** the shorter turn back to where the item was last seen. The server remembers that sighting's angle and the phone's heading then (`yaw_deg`); when lost it corrects the angle for how far the phone has turned since (heading difference wrapped across 0/360), so a user who turned right past the item is told "left". With no heading it uses the side the item was last seen on; if it was never seen it says "left".
-- **`/api/guide` `say`** is `""` when the direction or navigate hop has not changed since the last cue (server tracks this per item; a pause longer than 10 s starts a fresh session). The returned `angle` is smoothed against the previous angle if it was seen within 3 s.
+- **`/api/guide` `say`** is `""` when the direction or navigate hop has not changed since the last cue and fewer than about 8 s have passed (server tracks this per item; a pause longer than 10 s starts a fresh session). The returned `angle` is smoothed against the previous angle if it was seen within 3 s.
 - **`yaw_deg`** is accepted but not used server-side; yaw compensation happens in the browser (`web/src/phone/orientation.js`). Compensation wraps the yaw difference across 0/360.
 - **`clock_hour`** rounds halves up (`floor(x + 0.5)`) instead of Python's banker's `round()`, so 15 deg -> 1 and -15 deg -> 12.
 - **`distance_bucket`** rounds the box height to 4 decimals before comparing, so float noise (`0.6 - 0.5 = 0.0999...`) cannot flip a boundary.
@@ -325,12 +327,12 @@ requests leave learning active. A real `find` response saves/finishes the curren
 before starting guidance. Stopping guidance resumes learning with fresh continuity. An explicit
 manual finish remains an override until learning is restarted or the app reconnects.
 
-For `find_item` with no saved sighting, `/api/chat` returns `intent:"where"` with the item and
-“I don't know where your ITEM is yet. I haven't seen it.” It does not return `find` or launch
-a camera search. This applies to watchlist objects, aliases, and open-vocabulary names, including
-model tool calls and keyword fallback. `/api/where` uses the same message for never-seen items.
-When a sighting exists, find can start; route/location/facing checks still determine whether
-a walking instruction is possible. A saved sighting is not a claim the item is still there.
-Native recall responses also end any previous guidance, so an unknown answer cannot leave the
-user following directions to an earlier target. Low-level `/api/guide` remains available for
+For `find_item` or `where_is_item` with no saved sighting, `/api/chat` returns `intent:"where"`
+with the item and “I don't know where your ITEM is yet. I haven't seen it.” It does not return
+`find` or launch a camera search. This applies to watchlist objects, aliases, and open-vocabulary
+names, including model tool calls and keyword fallback. `/api/where` uses the same message for
+never-seen items. When a sighting exists, both “where's X” and “find X” return `intent:"find"`
+and start live guidance (where's also speaks the last-seen line, then “I'll guide you there.”).
+Route/location/facing checks still determine whether a walking instruction is possible. A saved
+sighting is not a claim the item is still there. Low-level `/api/guide` remains available for
 explicit camera detection tests; the conversational entry point enforces the unseen-item rule.

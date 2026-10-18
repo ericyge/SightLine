@@ -92,10 +92,22 @@ def assign_sighting(sighting_id: int, place_id: str | None) -> dict:
 
 
 def destination_for(sighting: dict | None) -> dict | None:
-    """Only the newest observation's place is a destination; never revive an older link."""
+    """Place linked to this sighting, or None when unassigned."""
     if sighting is None or sighting["place_id"] is None:
         return None
     return get_place(sighting["place_id"])
+
+
+def navigable_destination(item: str, *, limit: int = 10) -> dict | None:
+    """Newest assigned place among recent sightings (skips unassigned observations)."""
+    name = db.resolve_item(item)
+    if not name:
+        return None
+    for sighting in db.recent_sightings(name, limit):
+        dest = destination_for(sighting)
+        if dest is not None:
+            return dest
+    return None
 
 
 def recalled_items() -> list[dict]:
@@ -107,7 +119,7 @@ def recalled_items() -> list[dict]:
         seen_names.add(db.canonicalize_item(name) or name)
         history = db.recent_sightings(name, 1)
         last = history[0] if history else None
-        result.append({"item": name, "last": last, "destination": destination_for(last)})
+        result.append({"item": name, "last": last, "destination": navigable_destination(name)})
     for name in db.seen_items():
         canon = db.canonicalize_item(name) or name
         if canon in seen_names:
@@ -115,5 +127,5 @@ def recalled_items() -> list[dict]:
         seen_names.add(canon)
         history = db.recent_sightings(canon, 1)
         last = history[0] if history else None
-        result.append({"item": canon, "last": last, "destination": destination_for(last)})
+        result.append({"item": canon, "last": last, "destination": navigable_destination(canon)})
     return result

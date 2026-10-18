@@ -21,6 +21,33 @@ def _landmarks(values) -> set[str]:
     return {_normalized(v) for v in values}
 
 
+def _keyword_tokens(text: str) -> set[str]:
+    stop = {"the", "and", "with", "near", "beside", "from", "under", "above", "left", "right",
+            "side", "area", "room", "unknown", "surface", "view", "plain", "open", "closed"}
+    return {w for w in re.findall(r"[a-z0-9]{3,}", text.casefold()) if w not in stop}
+
+
+def _find_overlapping_place(name: str, room: str, landmarks: list[str], places: list[dict]) -> dict | None:
+    """Return an existing place when landmarks or same-room surface keywords clearly refer to it."""
+    uniq = _landmarks(landmarks)
+    for p in places:
+        if len(uniq & _landmarks(p["landmarks"])) >= 2:
+            return p
+    norm_room = _normalized(room or UNKNOWN_ROOM)
+    new_tokens = _keyword_tokens(name) | _keyword_tokens(" ".join(landmarks))
+    name_tokens = _keyword_tokens(name)
+    for p in places:
+        p_room = _normalized(p["room"] or UNKNOWN_ROOM)
+        if norm_room != UNKNOWN_ROOM and p_room != UNKNOWN_ROOM and norm_room != p_room:
+            continue
+        p_name_tokens = _keyword_tokens(p["name"])
+        p_tokens = p_name_tokens | _keyword_tokens(" ".join(p["landmarks"]))
+        # Same room + shared primary surface noun (e.g. "desk", "bed", "counter") and >=2 shared keywords.
+        if (name_tokens & p_name_tokens) and len(new_tokens & p_tokens) >= 2:
+            return p
+    return None
+
+
 def _slug(name: str) -> str:
     base = re.sub(r"[^a-z0-9]+", "_", name.casefold()).strip("_")[:40] or "place"
     if re.match(r"^[a-z0-9]", base):
@@ -75,18 +102,20 @@ def apply_survey(survey, *, previous_place_id: str | None = None,
         if not survey.name or not survey.description or len(uniq) < 2:
             return SurveyApplyResult(None, "unknown", False,
                                      "New place needs a name, description, and two distinct landmarks.")
-        if any(len(uniq & _landmarks(p["landmarks"])) >= 2 for p in current.values()):
-            return SurveyApplyResult(None, "unknown", False,
-                                     "Landmarks overlap an existing place; waiting for a clear match.")
         room = (room_hint or survey.room or UNKNOWN_ROOM).strip() or UNKNOWN_ROOM
-        place_id = f"auto_{_slug(survey.name)}_{uuid.uuid4().hex[:10]}"
-        if len(place_id) > 80:
-            place_id = "auto_" + uuid.uuid4().hex
-        memory.teach_map(MemoryMapUpdate(places=[Place(
-            id=place_id, name=survey.name.strip(), room=room,
-            description=survey.description.strip(), landmarks=landmarks[:20])]))
-        action = "new"
-        reason = f"Created place from walkthrough. {survey.reason}"
+        existing = _find_overlapping_place(survey.name, room, landmarks, list(current.values()))
+        if existing is not None:
+            place_id, action = existing["id"], "match"
+            reason = f"Merged with existing place {existing['name']}. {survey.reason}"
+        else:
+            place_id = f"auto_{_slug(survey.name)}_{uuid.uuid4().hex[:10]}"
+            if len(place_id) > 80:
+                place_id = "auto_" + uuid.uuid4().hex
+            memory.teach_map(MemoryMapUpdate(places=[Place(
+                id=place_id, name=survey.name.strip(), room=room,
+                description=survey.description.strip(), landmarks=landmarks[:20])]))
+            action = "new"
+            reason = f"Created place from walkthrough. {survey.reason}"
     else:
         return SurveyApplyResult(None, "unknown", False, "Unrecognized survey decision.")
 

@@ -23,13 +23,13 @@ Departure-facing checks now gate walking instructions; obstacle avoidance remain
   plus a stable numeric `id`, optional `place_id` linking the object to its destination,
   `place_source` (`"none"`, `"manual"`, or `"automatic"`), and `place_reason`.
 
-An object being absent from a later frame does not erase its last sighting. A newer sighting
-at an unassigned place returns `destination: null`; it does not revive an older mapped
-destination. `found: true` means “has been seen,” not “visible now” or “still there.”
-The profile's `home_spot` is a preference, not an observed location.
-Directions follow the same newest-sighting rule. A generic surface description, even an exact
-place name in `spot`, does not establish an assignment. If the latest sighting is unassigned,
-confirm its actual place and assign it, or capture a new observation with sufficient landmarks.
+An object being absent from a later frame does not erase its last sighting. Routing uses the
+newest assigned place among recent sightings, so a newer unassigned observation does not
+strand guidance when an older mapped place still exists. `found: true` means “has been seen,”
+not “visible now” or “still there.” The profile's `home_spot` is a preference, not an observed
+location. A generic surface description, even an exact place name in `spot`, does not establish
+an assignment. If no recent sighting is assigned, confirm a place and assign it, or capture a
+new observation with sufficient landmarks.
 
 Sightings can now be assigned to places **automatically** during `/api/observe` and video
 ingestion (`auto_place=True` by default) or **manually** via `place_id` / `assign`. In a

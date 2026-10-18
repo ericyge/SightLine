@@ -15,12 +15,12 @@ from ..models import Sighting
 from ..vision import VisionUnavailable
 from . import store
 from .mapwalk import MAX_SURVEY_CANDIDATES, apply_survey, candidate_places
-from .models import Place, PlaceID
+from .models import MemoryMapUpdate, Place, PlaceConnection, PlaceID
 from .observation import observe_and_save
 from .route import plan_route
 
 KEY = "live_calibration"
-MAX_CONTINUITY_SECONDS = 10
+MAX_CONTINUITY_SECONDS = 16
 _lock = threading.Lock()  # One camera walk, one server worker; never queue old frames.
 
 
@@ -191,6 +191,20 @@ def process_frame(vision, frame: bytes, session_id: str, sequence: int,
                                      captured_at, time.monotonic() + MAX_CONTINUITY_SECONDS)
         state["frames_processed"] += 1
         current = store.get_place(applied.place_id) if applied.place_id else None
+        if not vision.mock and applied.connection_added and prior and current and previous_place:
+            saved_edges = store.get_map()["connections"]
+            has_reverse = any(
+                e["from_place_id"] == current["id"] and e["to_place_id"] == previous_place["id"]
+                for e in saved_edges
+            )
+            if not has_reverse:
+                store.teach_map(MemoryMapUpdate(connections=[PlaceConnection(
+                    from_place_id=current["id"],
+                    to_place_id=previous_place["id"],
+                    departure_view=f"Leaving {current['name']} back toward {previous_place['name']}.",
+                    instruction="Turn around in place and walk straight ahead.",
+                    arrival_view=f"Arriving at {previous_place['name']}.",
+                )]))
         if current is None:
             cue_key, text = "unknown", "I can't recognize this view yet. Hold the camera steady and slowly scan nearby landmarks."
         elif prior and prior.place_id != current["id"] and not applied.connection_added:
@@ -207,6 +221,20 @@ def process_frame(vision, frame: bytes, session_id: str, sequence: int,
         try:
             sightings, _ = observe_and_save(vision, frame, None, captured_at.isoformat(),
                                             session_id=session_id, hints=hints, coalesce=True)
+            if not vision.mock and current is not None:
+                anchored = []
+                for s in sightings:
+                    carried = any(w in (s.get("spot") or "").lower() for w in ("inside a bag", "in hand", "carried"))
+                    if not carried and s.get("place_id") != current["id"]:
+                        try:
+                            if s.get("room") != current["room"]:
+                                with db.connect() as c:
+                                    c.execute("UPDATE sightings SET room=? WHERE id=?", (current["room"], s["id"]))
+                            s = store.assign_sighting(s["id"], current["id"])
+                        except Exception:
+                            pass
+                    anchored.append(s)
+                sightings = anchored
         except VisionUnavailable as exc:
             warning = str(exc)
         return {**status(vision), "action": applied.action, "connection_added": applied.connection_added,

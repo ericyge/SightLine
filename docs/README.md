@@ -5,13 +5,14 @@ Read these documents at the start of each new chat working on Sightline. The rep
 This is a repository instruction, not an application setting that automatically attaches files.
 
 1. [Project overview](PROJECT_OVERVIEW.md): purpose, architecture, implementation status, and remaining work.
-2. [API contract](CONTRACT.md): exact request/response fields, coordinates, nullable confidence, and errors.
-3. [Team roles](ROLES.md): ownership, completed implementation, and outstanding demo checkpoints.
-4. [Vision guide](VISION.md): local setup, mock mode, adding credentials, importing video, reference photos, and benchmarks.
-5. [Location memory](MEMORY.md): teach places/landmarks/connections, assign sightings, query destinations, and run an isolated mock test.
-6. [Live calibration](CALIBRATION.md): first-use native apartment mapping, phone trial, and open-vocabulary checks.
-7. [Navigation trial](NAVIGATION_TRIAL.md): departure-facing checks and a two-room return-to-object trial.
-8. [Demo checkpoints](DEMO_CHECKPOINTS.md): one-step-at-a-time implementation and verification for the apartment demo.
+2. [Pipeline](PIPELINE.md): end-to-end phone → backend flow (learning, chat, guidance, audio).
+3. [API contract](CONTRACT.md): exact request/response fields, coordinates, nullable confidence, and errors.
+4. [Team roles](ROLES.md): ownership, completed implementation, and outstanding demo checkpoints.
+5. [Vision guide](VISION.md): local setup, mock mode, adding credentials, importing video, reference photos, and benchmarks.
+6. [Location memory](MEMORY.md): teach places/landmarks/connections, assign sightings, query destinations, and run an isolated mock test.
+7. [Live calibration](CALIBRATION.md): first-use native apartment mapping, phone trial, and open-vocabulary checks.
+8. [Navigation trial](NAVIGATION_TRIAL.md): departure-facing checks and a two-room return-to-object trial.
+9. [Demo checkpoints](DEMO_CHECKPOINTS.md): one-step-at-a-time implementation and verification for the apartment demo.
 
 Also read the root [README.md](../README.md) for startup instructions and
 [SUMMARY.md](../SUMMARY.md) for the latest changes and what they mean for the user.

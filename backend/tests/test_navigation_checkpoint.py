@@ -84,26 +84,43 @@ def test_checkpoint_start_is_never_guessed_from_map_order(apartment, start):
 
 
 @pytest.mark.parametrize("room,spot", [
-    ("kitchen", "on the counter"),                         # Two counters: never choose the first.
+    ("kitchen", "on the counter"),                         # Spot text alone never invents a place.
     ("kitchen", "on counter beside the sink"),             # Even a name in text is not an assignment.
     ("bedroom", "inside a bag"),                          # One mapped place in a room is insufficient.
 ])
-def test_checkpoint_new_unassigned_sighting_blocks_old_destination(apartment, jpeg, room, spot):
+def test_checkpoint_unassigned_newest_falls_back_to_older_destination(apartment, jpeg, room, spot):
     remember_wallet(ts="2026-10-17T19:00:00Z")
     newest = remember_wallet(None, room=room, spot=spot)
     info = directions(apartment)
+    assert info["found"] and info["status"] == "ok"
+    assert info["destination"]["id"] == "kitchen_counter"
+    show(f"New unassigned sighting: {room}, {spot}", info)
+    where = apartment.get("/api/where?item=wallet&from_place=bedroom_door").json()
+    assert where["history"][0]["id"] == newest["id"]
+    assert where["history"][0]["place_id"] is None
+    assert where["destination"]["id"] == "kitchen_counter"
+    assert where["directions"]
+    assert "last mapped" in where["say"]
+    nav = guide(apartment, jpeg)
+    assert nav["mode"] == "navigate" and nav["destination"]["id"] == "kitchen_counter"
+    assert nav["next_instruction"] and nav["say"]
+    show("Guidance falls back to older mapped place", nav)
+    assert guide(apartment, jpeg)["say"] == ""  # No speech spam within the repeat window.
+
+
+def test_checkpoint_all_unassigned_sightings_are_unknown_destination(apartment, jpeg):
+    newest = remember_wallet(None, room="bedroom", spot="inside a bag")
+    info = directions(apartment)
     assert info["found"] and info["status"] == "unknown_destination"
     assert info["destination"] is None and info["steps"] == info["hops"] == []
-    show(f"New sighting: {room}, {spot}", info)
     where = apartment.get("/api/where?item=wallet&from_place=bedroom_door").json()
     assert where["history"][0]["id"] == newest["id"]
     assert where["destination"] is None and where["directions"] == []
     lost = guide(apartment, jpeg)
     assert lost["mode"] == "lost" and lost["destination"] is None
-    assert lost["next_instruction"] is None and lost["beep_ms"] == 0
     assert "couldn't identify its place" in lost["say"]
-    show("Guidance with unassigned destination", lost)
-    assert guide(apartment, jpeg)["say"] == ""  # No speech spam.
+    show("No mapped place among recent sightings", lost)
+    assert guide(apartment, jpeg)["say"] == ""
 
 
 def test_checkpoint_clearing_an_assignment_is_respected(apartment, jpeg):
@@ -166,7 +183,7 @@ def test_checkpoint_never_seen_item_has_no_route(apartment, jpeg):
     show("Wallet never seen", result)
 
 
-def test_checkpoint_cli_requires_start_and_newest_assignment(apartment, capsys):
+def test_checkpoint_cli_requires_start_and_falls_back_assignment(apartment, capsys):
     remember_wallet()
     assert memory_cli(["directions", "wallet"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "unknown_current"
@@ -174,8 +191,8 @@ def test_checkpoint_cli_requires_start_and_newest_assignment(apartment, capsys):
     assert json.loads(capsys.readouterr().out)["status"] == "ok"
     remember_wallet(None, ts="2026-10-17T21:00:00Z")
     assert memory_cli(["directions", "wallet", "--from-place", "bedroom_door"]) == 0
-    assert json.loads(capsys.readouterr().out)["status"] == "unknown_destination"
+    assert json.loads(capsys.readouterr().out)["status"] == "ok"
     assert memory_cli(["where", "wallet", "--from-place", "bedroom_door"]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result["destination"] is None and result["directions"] == []
-    print("\nCLI: requires a known start and respects the newest assignment.")
+    assert result["destination"]["id"] == "kitchen_counter" and result["directions"]
+    print("\nCLI: requires a known start; unassigned newest falls back to older mapped place.")

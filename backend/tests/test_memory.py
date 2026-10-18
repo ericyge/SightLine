@@ -139,19 +139,21 @@ def test_assignment_errors_do_not_modify_observation(client):
     assert db.recent_sightings("wallet") == [old]
 
 
-def test_new_unmapped_sighting_does_not_reuse_older_destination(client):
+def test_new_unmapped_sighting_falls_back_to_older_destination(client):
     teach(client)
     old = sighting(place_id="kitchen_counter")
     newest = sighting("2026-10-17T20:00:00Z", room="bedroom")
     # Importing an older frame afterwards must not make it the latest memory.
     sighting("2026-10-17T11:30:00-07:00", place_id="kitchen_counter")
     answer = client.get("/api/where?item=wallet").json()
-    assert answer["found"] and answer["destination"] is None
+    assert answer["found"] and answer["destination"]["id"] == "kitchen_counter"
     assert answer["history"][0] == newest
+    assert answer["history"][0]["place_id"] is None
     assert answer["history"][1]["id"] == old["id"]
+    assert "last mapped" in answer["say"]
     items = client.get("/api/memory/items").json()
-    assert next(i for i in items if i["item"] == "wallet") == {
-        "item": "wallet", "last": newest, "destination": None}
+    wallet = next(i for i in items if i["item"] == "wallet")
+    assert wallet["last"] == newest and wallet["destination"]["id"] == "kitchen_counter"
     assert next(i for i in items if i["item"] == "keys")["last"] is None
 
 

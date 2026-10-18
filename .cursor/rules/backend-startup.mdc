@@ -1,0 +1,10 @@
+---
+description: Never start the Sightline backend; the user runs it
+alwaysApply: true
+---
+
+# Backend startup
+
+Never start, restart, or background the Sightline backend (`uvicorn`, `python -m uvicorn app.main:app`, etc.).
+
+The user always starts the backend themselves. If the server is down, tell them what command to run and from which directory; do not run it.

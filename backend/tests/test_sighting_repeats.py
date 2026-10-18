@@ -60,7 +60,8 @@ def test_meaningful_changes_are_not_collapsed(setup, jpeg, change):
     assert len(db.recent_sightings('wallet')) == 2
     if change == 'unknown':
         assert db.recent_sightings('wallet')[0]['place_id'] is None
-        assert memory.directions_to_item('wallet', from_place_id='counter')['status'] == 'unknown_destination'
+        # Newest is unassigned; route still uses the older mapped counter.
+        assert memory.directions_to_item('wallet', from_place_id='counter')['status'] == 'already_there'
 
 
 def test_return_to_previous_place_creates_new_event(setup, jpeg):

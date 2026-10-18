@@ -145,12 +145,20 @@ export function useWake({ enabled, server, onWake, onUtterance, endpoint }: Prop
       }
       setState('connecting');
       open();
-      try {
-        await stream.start();
-      } catch (e) {
-        if (!cancelled) {
-          setState('error');
-          setDetail(`Microphone stream failed: ${errorText(e)}`);
+      let started = false;
+      for (let attempt = 0; attempt < 3 && !cancelled && !started; attempt++) {
+        // Give any finishing AudioPlayer 150ms to release before AudioStream.start() switches
+        // AVAudioSession to .record (avoids OSStatus 561017449 / !pri).
+        await new Promise<void>((r) => setTimeout(r, attempt === 0 ? 150 : 250));
+        if (cancelled) return;
+        try {
+          await stream.start();
+          started = true;
+        } catch (e) {
+          if (attempt === 2 && !cancelled) {
+            setState('error');
+            setDetail(`Microphone stream failed: ${errorText(e)}`);
+          }
         }
       }
     })();

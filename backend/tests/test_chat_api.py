@@ -55,8 +55,9 @@ def test_where_uses_stored_sightings(client, jpeg):
     assert chat(client, "where's my wallet")["say"] == "I don't know where your wallet is yet. I haven't seen it."
     client.post("/api/observe", files=frame(jpeg), data={"room": "bedroom"})
     r = chat(client, "where's my wallet")
-    assert r["intent"] == "where" and r["item"] == "wallet"
-    assert r["say"].startswith("Last seen at") and "bedroom" in r["say"]   # main's place-aware wording
+    assert r["intent"] == "find" and r["item"] == "wallet"
+    assert r["say"].startswith("Last seen at") and "bedroom" in r["say"]
+    assert "I'll guide you there." in r["say"]
 
 
 def test_alias_maps_to_item(client):

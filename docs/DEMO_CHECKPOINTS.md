@@ -10,10 +10,10 @@ ask about objects. Users never supply a starting place; live guidance recognizes
 
 ## Step 1: directions only from supported locations — implemented
 
-The newest sighting must have a saved place assignment. A newer unassigned sighting blocks
-routing to an older destination. Surface descriptions and room names never replace that link.
-Directions queries require an explicit known starting place; the live guide uses camera
-localization. Routes use saved connections in their recorded direction only.
+Routing uses the newest assigned place among recent sightings. A newer unassigned sighting
+does not erase an older mapped destination; surface descriptions and room names still never
+invent a place link. Directions queries require an explicit known starting place; the live
+guide uses camera localization. Routes use saved connections in their recorded direction only.
 
 Run from the existing backend directory:
 
@@ -22,13 +22,14 @@ cd /Users/eric/Files/DubHack26/Sightline/backend
 ../venv/bin/python -m pytest tests/test_navigation_checkpoint.py -q -s
 ```
 
-Expected: **12 passed**, with printed spoken responses for these scenarios:
+Expected: **13 passed**, with printed spoken responses for these scenarios:
 
 - Known bedroom doorway and wallet at kitchen counter: hallway instruction, counter
   instruction, arrival message, then visual guidance when mock detection sees the wallet.
 - Missing/invalid starting place: `unknown_current`, no walking steps.
-- A newer unassigned wallet sighting: `unknown_destination`, even with an older assigned
-  sighting, two possible counters, a place name in the spot text, or one mapped place in a room.
+- A newer unassigned wallet sighting: falls back to the older assigned destination (spot text
+  and room names still do not invent a place). Only when no recent sighting is assigned:
+  `unknown_destination`.
 - A manually cleared assignment: no route until the assignment is confirmed again.
 - Camera cannot identify the user's place: `lost`, no beeps/walking steps, a request to scan
   slowly. When the camera recognizes the place again, its instruction is spoken again.

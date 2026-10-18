@@ -109,7 +109,7 @@ The green box at the top of the screen counts every frame: `Memory: N sent · ok
 
 With the backend set up for it (root README: "Hey Jarvis" wake word), the debug box shows `Wake word: listening for "Hey Jarvis"` and a **Hey Jarvis: ON/OFF** switch appears. Say "Hey Jarvis", feel the buzz, then say your request ("find my keys"); it stops listening when you stop talking and handles the request like the talk button. Files: `src/useWake.ts` (microphone stream + WebSocket), `src/wakeCore.ts` (tested logic: audio conversion, end-of-speech, WAV, URLs).
 
-How it behaves on iPhone, from expo-audio's native code: starting the microphone stream switches the phone to **record-only**, so nothing can play while it runs. The app therefore turns the wake word off while guiding (beeps), while a reply is being spoken, and while you hold the talk button, then restores playback and turns it back on. That also means "Hey Jarvis, stop" does not work during guidance; use the Stop button.
+How it behaves on iPhone, from expo-audio's native code: starting the microphone stream switches the phone to **record-only**, so nothing can play while it runs. The app keeps Hey Jarvis armed during guidance (blind-first: say “Hey Jarvis, stop” without finding a button), yields the mic while a reply/cue plays or a request is captured, and treats hold-to-talk as backup only. Beeps pause while a command is being captured.
 
 Unverified on a real phone: the microphone stream itself (Expo Go), the level thresholds for detecting the end of your request (`DEFAULT_ENDPOINT` in `wakeCore.ts`; the debug box shows the live mic level to tune them), the WebSocket through a Cloudflare/ngrok tunnel, how well a real voice triggers the model, and Android.
 

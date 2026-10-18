@@ -53,7 +53,7 @@ def main(argv=None) -> int:
             watched = db.is_watched(args.item)
             history = db.recent_sightings(name, 5) if name else []
             route_info = directions_to_item(args.item, from_place_id=args.from_place)
-            dest = memory.destination_for(history[0] if history else None)
+            dest = memory.navigable_destination(name) if name else None
             result = {"item": name or args.item.strip().lower(), "watched": watched,
                       "found": bool(history), "history": history,
                       "destination": dest, "directions": route_info.get("steps", [])}

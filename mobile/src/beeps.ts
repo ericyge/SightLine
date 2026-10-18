@@ -21,7 +21,7 @@ export function prepareBeeps() {
       const file = new File(Paths.cache, `sightline-beep-${pan}-${name}.wav`);
       if (!file.exists) file.create();
       file.write(makeBeepWav(pan, hz));
-      players.set(`${pan}:${name}`, createAudioPlayer({ uri: file.uri }));
+      players.set(`${pan}:${name}`, createAudioPlayer({ uri: file.uri }, { keepAudioSessionActive: true }));
     }
   }
 }
@@ -30,7 +30,9 @@ export function prepareBeeps() {
 export function playBeep(pan: number, boost: boolean) {
   const player = players.get(`${nearestPan(pan)}:${boost ? 'boost' : 'normal'}`);
   if (!player) return;
-  void player.seekTo(0).then(() => player.play());
+  void player.seekTo(0).then(() => {
+    try { player.play(); } catch { /* ignore AVAudioSession transition races */ }
+  }).catch(() => {});
 }
 
 export function releaseBeeps() {

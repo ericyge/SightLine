@@ -8,6 +8,7 @@ from dataclasses import dataclass
 LOST_AFTER_S = 2.0          # not found this long -> "Lost it"
 SMOOTH_WINDOW_S = 3.0       # only smooth against an angle seen this recently
 CENTER_DEG = 8.0            # |angle| <= this counts as "on target"
+NAVIGATE_REPEAT_S = 14.0    # re-speak the same navigate cue after this long (leaves quiet window for "Hey Jarvis")
 
 
 def angle_deg(x: float, fov_h: float = 65.0) -> float:
@@ -131,17 +132,29 @@ class GuideState:
 
 @dataclass
 class NavigateState:
-    """Per-item room-to-room cue tracking. Speak only when the hop or fallback key changes."""
+    """Per-item room-to-room cue tracking. Speak on hop/facing change, or re-prompt on interval."""
     since: float
     last_key: str | None = None
+    last_spoken_at: float = 0.0
+    last_place_id: str | None = None
+    last_place_at: float = 0.0
     touched: float = 0.0
 
 
-def navigate_say(text: str, key: str, last_key: str | None) -> tuple[str, str]:
-    """Return (spoken text, new key); empty text when the navigation cue has not changed."""
-    if key == last_key:
-        return "", last_key
-    return text, key
+def navigate_say(
+    text: str,
+    key: str,
+    last_key: str | None,
+    *,
+    now: float | None = None,
+    last_spoken_at: float = 0.0,
+    repeat_s: float = NAVIGATE_REPEAT_S,
+) -> tuple[str, str, float]:
+    """Return (spoken text, new key, last_spoken_at); empty when cue unchanged within repeat_s."""
+    if key == last_key and (now is None or now - last_spoken_at < repeat_s):
+        return "", last_key, last_spoken_at
+    spoken_at = last_spoken_at if now is None else now
+    return text, key, spoken_at
 
 
 def compute_guide(item: str, box: list[float] | None, state: GuideState, style: str,

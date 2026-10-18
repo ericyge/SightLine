@@ -1,6 +1,19 @@
 # Sightline change summary
 
-## Latest update: automatic apartment learning and honest unknown-item answers
+## Latest update: Hey Jarvis stays on during guidance (blind-first)
+
+Hands-free voice is the primary input. Hey Jarvis stays armed while guiding so you can say
+“Hey Jarvis, stop” without finding a button. The mic yields only while TTS plays or a command
+is captured; hold-to-talk is demoted to a backup control. Reload the Expo app to pick this up.
+
+## Previous: “Where’s my X?” starts guidance
+
+Saying “Where’s my water bottle?” (or any remembered item) now starts the same live guidance
+loop as “Find my …”. The spoken reply is the last-seen line plus “I'll guide you there.”
+Unseen items still get only the unknown answer and do not start navigation. Change is in
+`backend/app/main.py` (`_chat_response`); chat tests and `docs/CONTRACT.md` updated.
+
+## Previous update: automatic apartment learning and honest unknown-item answers
 
 You no longer need to start or finish calibration. The native app learns places, paths, and
 objects while connected and not actively guiding. You can ask questions anytime. If an object

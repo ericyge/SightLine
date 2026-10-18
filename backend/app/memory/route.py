@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import asdict, dataclass, field
 
 from .. import db
-from .store import destination_for, get_map
+from .store import destination_for, get_map, navigable_destination
 
 
 @dataclass
@@ -81,9 +81,9 @@ def plan_route(current_place_id: str | None, destination_place_id: str | None,
 
 
 def directions_to_item(item: str, *, from_place_id: str | None = None) -> dict:
-    """Route from an explicit start to the newest sighting's assigned destination only."""
+    """Route from an explicit start to the newest assigned destination among recent sightings."""
     name = db.resolve_item(item)
-    history = db.recent_sightings(name, 1) if name else []
+    history = db.recent_sightings(name, 10) if name else []
     saved = get_map()
     places = saved["places"]
     by_id = {p["id"]: p for p in places}
@@ -103,7 +103,9 @@ def directions_to_item(item: str, *, from_place_id: str | None = None) -> dict:
         }
 
     last = history[0]
-    destination = destination_for(last)
+    destination = navigable_destination(name)
+    # Prefer the newest assigned sighting's spot text when the latest observation is unlinked.
+    assigned = next((s for s in history if destination_for(s) is not None), last)
 
     current_place = by_id.get(from_place_id) if from_place_id else None
     if destination is None:
@@ -121,13 +123,14 @@ def directions_to_item(item: str, *, from_place_id: str | None = None) -> dict:
         }
 
     plan = plan_route(from_place_id, destination["id"], saved["connections"], places)
+    spot = assigned.get("spot") or last.get("spot") or ""
     steps = [h.instruction for h in plan.hops]
     if plan.status == "ok":
-        steps.append(f"Arrive at {destination['name']}: look for your {name} ({last['spot']}).")
+        steps.append(f"Arrive at {destination['name']}: stop and reach in front of you for your {name} ({spot}).")
         numbered = " ".join(f"Step {i + 1}: {s}" for i, s in enumerate(steps))
         say = f"To reach your {name} at {destination['name']}: {numbered}"
     elif plan.status == "already_there":
-        steps = [f"You are already at {destination['name']}. Look for your {name} ({last['spot']})."]
+        steps = [f"You are already at {destination['name']}. Stop and reach in front of you for your {name} ({spot})."]
         say = steps[0]
     elif plan.status == "unknown_current":
         say = f"Your {name} was last seen at {destination['name']}, but your starting place is unknown."

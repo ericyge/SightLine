@@ -97,7 +97,11 @@ def resolve_frame(c, detections, room, context):
     for key, group in groups.items():
         evidence = group[0].location
         others = [d.location for other, values in groups.items() if other != key for d in values if d.location]
-        conflict = any(d.location != evidence for d in group)
+        conflict = any(
+            (d.location is None) != (evidence is None)
+            or (d.location and evidence and d.location.model_dump(exclude={"reason"}) != evidence.model_dump(exclude={"reason"}))
+            for d in group
+        )
         if evidence:
             # Distinct frame surfaces cannot share a persistent match or indistinguishable new evidence.
             conflict |= any((evidence.candidate_id is not None and e.candidate_id == evidence.candidate_id) or

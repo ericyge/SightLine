@@ -319,13 +319,14 @@ class _NavigationLocalization(_Localization):
 
 
 DEPARTURE_PROMPT = """
-Also assess the matched place's supplied departure (the next directed route hop).
+Also assess the matched place's supplied departure (the next directed route hop) for a blind user holding the phone forward.
 Recognize the camera's current position, not a distant place merely visible across the room.
 Compare the current view with departure_view; knowing a room does NOT establish facing.
 Return departure_status:
-- aligned: the visible fixed landmark relationships establish the recorded departure facing.
-- left/right: the departure direction is visibly to that side; turn in place, not walking.
-- blocked: a visible obstruction blocks that departure.
+- aligned: the target path or destination surface in departure_view is in the center of the camera view (user can walk straight ahead or reach straight in front of them).
+- left: the target path or destination surface is toward the left side of the camera view (user needs to turn left in place).
+- right: the target path or destination surface is toward the right side of the camera view (user needs to turn right in place).
+- blocked: a visible obstruction directly ahead blocks walking forward (user must stop).
 - unknown: no departure, missing/ambiguous facing evidence, blurred view, or no place match.
 Never assume aligned from place identity or route text alone. Never infer an unseen exit or
 invent turn angles, steps, or distances. A visible blockage overrides aligned. Describe the
@@ -379,7 +380,12 @@ Look at the FINAL current image. Decide whether this view is:
 Only when BOTH a previous camera image and previous_place are supplied, and the images clearly
 support a direct traversable transition to a DIFFERENT place, set transition_observed true.
 Supply instruction_from_previous plus departure_view and arrival_view describing the facing
-context visible in those images. Prefer landmark-relative instructions. Do not infer a path
+context visible in those images. The user is blind/visually impaired: instruction_from_previous
+MUST be a physical, body-relative movement instruction starting with a clear action such as
+"Turn left and walk straight ahead", "Turn right and take a few steps forward",
+"Walk straight ahead through the doorway", or "Step forward and reach in front of you"
+(never tell a blind user to "look at" or "head toward" a visual landmark without saying whether
+to turn left, turn right, or walk straight). Do not infer a path
 from place names, a camera pan, two unrelated rooms, or an unseen corridor. If a direct transition
 is uncertain, transition_observed must be false and all three transition text fields null.
 Never generate the reverse route. Repeated views of the same place are not transitions.
@@ -563,6 +569,17 @@ class PerceptronVision(VisionClient):
             result.transition_observed = False
             result.instruction_from_previous = None
             result.departure_view = result.arrival_view = None
+        elif result.decision in ("match", "new") and result.place_id != previous.get("id"):
+            target_name = result.name or next(
+                (p["name"] for p in places if p["id"] == result.place_id), "the next area"
+            )
+            result.transition_observed = True
+            if not result.instruction_from_previous:
+                result.instruction_from_previous = "Walk straight ahead a few steps."
+            if not result.departure_view:
+                result.departure_view = f"Leaving {previous['name']} toward {target_name}."
+            if not result.arrival_view:
+                result.arrival_view = f"Arriving at {target_name}."
         return result
 
     def _detect(self, frame, items, room, place_context=None):
@@ -606,6 +623,7 @@ class PerceptronVision(VisionClient):
             raise VisionUnavailable("Perceptron returned invalid labels; this frame was not saved.") from None
         seen = set()
         out = []
+        shared_locations: dict[str, PlaceEvidence] = {}
         for label in labels:
             if located:
                 item_name = db.canonicalize_item(label.item, items)
@@ -618,8 +636,17 @@ class PerceptronVision(VisionClient):
                 if item_name not in names or item_name in seen:
                     raise VisionUnavailable("Perceptron returned unknown or duplicate item labels.")
             seen.add(item_name)
-            out.append(Detection(item_name, [n / 1000 for n in label.box], None, label.spot.strip(),
-                                 getattr(label, "location", None)))
+            loc = getattr(label, "location", None)
+            if located and loc is not None:
+                group_key = (
+                    f"cand:{loc.candidate_id}" if loc.candidate_id
+                    else f"key:{loc.local_key or loc.name or ''}"
+                )
+                if group_key in shared_locations:
+                    loc = shared_locations[group_key]
+                else:
+                    shared_locations[group_key] = loc
+            out.append(Detection(item_name, [n / 1000 for n in label.box], None, label.spot.strip(), loc))
         return out
 
 

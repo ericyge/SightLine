@@ -59,6 +59,8 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   const [wakeAvailable, setWakeAvailable] = useState(false);   // backend can run the wake word
   const [wakeOn, setWakeOn] = useState(true);                   // the user's switch
   const [wakeBusy, setWakeBusy] = useState(false);              // handling a wake request, or its reply is playing
+  const [speechBusy, setSpeechBusy] = useState(false);          // TTS/spoken cue playing (wake must yield the mic)
+  const hushBeeps = useRef(false);                              // true while wake or speech owns the audio session
   const [rooms, setRooms] = useState<string[]>(['bedroom', 'kitchen', 'living room']);
   const [room, setRoom] = useState('');  // Automatic: never constrain a walk to the first profile room.
   const [sessionId] = useState(observationSession);
@@ -147,10 +149,11 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
         calibrationSequence.current = restored.last_sequence;
         setCalibration(restored);
         setStatus(restored.status === 'mapping'
-          ? 'Learning your apartment in the background. Ask about an object anytime.'
+          ? 'Learning in the background. Say Hey Jarvis, then ask about an object.'
           : 'Ready. Apartment learning needs the full Perceptron mode.');
-        if (restored.status === 'mapping') {
-          void voice.cue('I’ll remember objects and learn your apartment as you move around. Ask me about an object anytime.');
+        if (restored.status === 'mapping' && !(health.stt === 'elevenlabs' && Boolean(health.wake))) {
+          void voice.cue(
+            'I’ll remember objects as you move. Hold to talk needs the speech key; prefer Hey Jarvis when wake is on.');
         }
       } catch {
         if (cancelled) return;
@@ -265,9 +268,11 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     if (!guiding) return;
     let cancelled = false;
     let guidanceFailed = false;
+    // Guarantee iOS playback mode so 3D spatial beeps and voice cues are never silenced by record-only mode.
+    void setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false }).catch(() => {});
     (async () => {
       while (!cancelled) {
-        if (pausedRef.current || !cameraUsable()) { await sleep(250); continue; }
+        if (testing || calibrationActionRef.current || !cameraUsable()) { await sleep(250); continue; }
         const t0 = Date.now();
         let result: Result;
         try {
@@ -278,7 +283,18 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
           if (r) {
             guideRef.current = { last: r, yawAtLast: yaw, at: Date.now() };
             const spoken = r.say || (guidanceFailed ? r.next_instruction || 'Camera updates have resumed.' : '');
-            if (spoken) { void voice.cue(spoken); setCue(spoken); }
+            if (spoken) {
+              setCue(spoken);
+              // Yield Hey Jarvis mic so iOS can play the cue over loudspeaker, then wait 350ms
+              // for speaker echo to decay before re-arming the wake mic.
+              setSpeechBusy(true);
+              try {
+                await sleep(80);
+                await voice.cue(spoken);
+              } finally {
+                await sleep(350);
+              }
+            }
             guidanceFailed = false;
           }
           result = { kind: r ? 'ok' : 'dropped', at: Date.now(), ms: Date.now() - t0 };
@@ -303,7 +319,12 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     })();
     (async () => {
       while (!cancelled) {
+        // Hands-free wake owns the mic on iOS (record-only). Only play spatial beeps while TTS
+        // is active (`speechBusy`) or when wake listening is turned off (`!wakeEnabled`);
+        // otherwise `playBeep` and `AudioStream` fight over AVAudioSession (OSStatus 561017449)
+        // and kill the "Hey Jarvis" microphone stream.
         const { last, yawAtLast, at } = guideRef.current;
+        if (hushBeeps.current || wakeEnabled || last?.distance === 'reach') { await sleep(100); continue; }
         if (last?.found && last.angle != null && Date.now() - at < STALE_MS) {
           // Between vision updates, keep the pan right as the phone turns.
           const angle = compensate(last.angle, getYaw(), yawAtLast);
@@ -315,7 +336,21 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
       }
     })();
     return () => { cancelled = true; guideRef.current = { last: null, yawAtLast: null, at: 0 }; };
-  }, [api, guiding, captureFrame, afterAttempt]);
+  }, [api, guiding, wakeEnabled, captureFrame, afterAttempt]);
+
+  // Poll spoken output so wake can release the mic while replies/cues play (iOS record-only conflict).
+  useEffect(() => {
+    if (!connected) { setSpeechBusy(false); return; }
+    let cancelled = false;
+    (async () => {
+      while (!cancelled) {
+        const busy = (await Speech.isSpeakingAsync()) || isVoicePlaying();
+        if (!cancelled) setSpeechBusy(busy);
+        await sleep(200);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [connected]);
 
   /** Take ONE photo with default options and report exactly what happened (isolates the camera). */
   async function testPhoto() {
@@ -347,11 +382,19 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     history.current = [...history.current, { role: 'assistant' as const, content: r.say.slice(0, 500) }]
       .slice(-HISTORY_TURNS);
     if (r.intent === 'stop') return stopGuidance();
-    if (r.intent === 'find' && r.item) setGuiding(r.item);
+    if (r.intent === 'find' && r.item) {
+      setGuiding(r.item);
+      pausedRef.current = false; // Let /api/guide start localizing while the initial reply speaks.
+    }
     if (r.intent === 'where') { setGuiding(null); setCue(''); }
     if (r.intent === 'set_room' && r.room) setRoom(r.room);
     setStatus(r.say);
-    await voice.reply(r.say);   // ElevenLabs voice when enabled, built-in voice on any failure
+    setSpeechBusy(true);
+    try {
+      await voice.reply(r.say);   // ElevenLabs voice when enabled, built-in voice on any failure
+    } finally {
+      await sleep(400);           // let room echo decay before re-arming the wake mic
+    }
   }, [stopGuidance]);
 
   const changeCalibration = useCallback(async (action: 'start' | 'finish', quiet = false): Promise<boolean> => {
@@ -420,10 +463,13 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     }
   }, [api, apply, changeCalibration]);
 
-  // ---- "Hey Jarvis": hands-free start of the same listening flow ----
-  // iOS: while the wake word streams the microphone nothing can play, so it is only on when the app is
-  // idle (not guiding, not replying, not holding the talk button) and is restarted after each request.
-  const wakeEnabled = wakeAvailable && wakeOn && connected && stt === 'elevenlabs' && !guiding && !listening && !wakeBusy;
+  // ---- "Hey Jarvis": primary hands-free path (blind-first; hold-to-talk is backup only) ----
+  // iOS: AudioStream forces record-only mode while active. Yield the mic whenever TTS speech
+  // (`speechBusy`), a wake utterance (`wakeBusy`), or push-to-talk (`listening`) is active, and
+  // immediately re-arm "Hey Jarvis" in between guidance cues so the user can say
+  // "Hey Jarvis, I got the wallet" or "Hey Jarvis, stop" hands-free.
+  const wakeEnabled = (wakeAvailable && wakeOn && connected && stt === 'elevenlabs'
+    && !listening && !wakeBusy && !speechBusy);
 
   /** Wait until the spoken reply has finished, so the microphone stream does not cut it off. */
   const waitUntilQuiet = useCallback(async () => {
@@ -469,16 +515,26 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     onUtterance: (wav, reason) => { void handleWakeRequest(wav, reason); },
   });
 
+  useEffect(() => {
+    // Hush beeps while capturing a command, while TTS owns the speaker, or when the item is in
+    // reach ("Stop. Reach straight in front of you now") so the mic stays open in record mode for
+    // "Hey Jarvis, I got the wallet" without playBeep fighting AVAudioSession.
+    const reached = guideRef.current.last?.distance === 'reach';
+    hushBeeps.current = speechBusy || wakeBusy || listening || wake.state === 'capturing' || reached;
+  }, [speechBusy, wakeBusy, listening, wake.state]);
+
   const wakeLine = ((): { text: string; bad: boolean } => {
-    if (!wakeAvailable) return { text: 'not available on the server (WAKE_ENABLED=true and the wake packages/models)', bad: false };
-    if (stt !== 'elevenlabs') return { text: 'needs the server speech-to-text (STT_PROVIDER=elevenlabs)', bad: false };
-    if (!wakeOn) return { text: 'off', bad: false };
+    if (!wakeAvailable) return { text: 'not available on the server (WAKE_ENABLED=true and the wake packages/models)', bad: true };
+    if (stt !== 'elevenlabs') return { text: 'needs STT_PROVIDER=elevenlabs for Hey Jarvis', bad: true };
+    if (!wakeOn) return { text: 'off — tap Hey Jarvis: ON', bad: true };
     if (!connected) return { text: 'waiting for the backend', bad: false };
-    if (guiding) return { text: 'paused while guiding (the speaker is in use)', bad: false };
+    if (speechBusy) return { text: 'paused while speaking (will resume)', bad: false };
     if (listening || wakeBusy) return { text: 'paused while handling a request', bad: false };
     if (wake.state === 'error') return { text: wake.detail || 'error', bad: true };
     if (wake.state === 'capturing') return { text: `heard you, capturing your request (${wake.level} dB)`, bad: false };
-    if (wake.state === 'listening') return { text: `listening for "Hey Jarvis" (mic ${wake.level} dB)`, bad: false };
+    if (wake.state === 'listening') {
+      return { text: `listening for "Hey Jarvis" (mic ${wake.level} dB)`, bad: false };
+    }
     return { text: 'connecting...', bad: false };
   })();
 
@@ -548,6 +604,13 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
       <ScrollView style={styles.panelScroll} contentContainerStyle={styles.panel}>
         {mock && <Text style={styles.badge}>MOCK MODE: fake detections</Text>}
         <Text style={styles.status} accessibilityLiveRegion="polite">{status}</Text>
+        <Text style={[styles.wakeHint, wakeLine.bad && styles.debugBad]} accessibilityLiveRegion="polite">
+          {wakeEnabled && wake.state === 'listening'
+            ? (guiding
+              ? 'Hands-free: say Hey Jarvis, then stop — or another request.'
+              : 'Hands-free: say Hey Jarvis, then your request.')
+            : `Hey Jarvis: ${wakeLine.text}`}
+        </Text>
         <View style={styles.calibration}>
           <Text style={styles.calibrationText}>
             {guiding ? 'Learning paused while guiding' : calibration?.status === 'mapping' ? 'Learning in the background' : 'Apartment memory'}
@@ -573,7 +636,12 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
             Calibration is unavailable with the current server vision mode.
           </Text>}
         </View>
-        {guiding && <Text style={styles.cue}>{cue || `Searching for ${guiding}…`}</Text>}
+        {guiding && (
+          <Pressable onPress={stopGuidance} accessibilityRole="button"
+            accessibilityLabel={`Guiding to ${guiding}. ${cue || 'Searching'}. Tap to stop guidance.`}>
+            <Text style={styles.cue}>{cue || `Searching for ${guiding}…`}</Text>
+          </Pressable>
+        )}
         {calibration?.status !== 'mapping' && <View style={styles.rooms} accessibilityRole="radiogroup">
           {['', ...rooms].map((r) => (
             <Pressable key={r} onPress={() => setRoom(r)} accessibilityRole="radio"
@@ -657,16 +725,17 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
         )}
         {guiding && (
           <Pressable onPress={stopGuidance} accessibilityRole="button" accessibilityLabel="Stop guidance"
+            accessibilityHint="Or say Hey Jarvis, then stop"
             style={styles.stop}>
             <Text style={styles.stopText}>Stop</Text>
           </Pressable>
         )}
-        {/* TODO(C): press-and-hold is awkward with VoiceOver/TalkBack; add a double-tap toggle. */}
+        {/* Backup only — primary input is Hey Jarvis (blind-first). */}
         <Pressable onPressIn={beginTalk} onPressOut={endTalk} disabled={stt !== 'elevenlabs'}
-          accessibilityRole="button" accessibilityLabel="Hold to talk"
-          accessibilityHint="Press and hold, speak, then release"
-          style={[styles.talk, listening && styles.talkOn, stt !== 'elevenlabs' && styles.talkOff]}>
-          <Text style={styles.bigText}>{listening ? 'Listening…' : 'Hold to talk'}</Text>
+          accessibilityRole="button" accessibilityLabel="Hold to talk backup"
+          accessibilityHint="Backup if Hey Jarvis is unavailable. Prefer saying Hey Jarvis."
+          style={[styles.talkBackup, listening && styles.talkOn, stt !== 'elevenlabs' && styles.talkOff]}>
+          <Text style={styles.backupText}>{listening ? 'Listening…' : 'Hold to talk (backup)'}</Text>
         </Pressable>
       </View>
     </View>
@@ -681,6 +750,7 @@ const styles = StyleSheet.create({
   calibrationText: { color: '#fff', fontSize: 22, fontWeight: '700' },
   badge: { alignSelf: 'flex-start', backgroundColor: '#ffe14d', color: '#000', fontWeight: '800', padding: 6, borderRadius: 6 },
   status: { color: '#fff', fontSize: 22, lineHeight: 30 },
+  wakeHint: { color: '#9cf', fontSize: 20, lineHeight: 28, fontWeight: '600' },
   cue: { color: '#ffe14d', fontSize: 30, fontWeight: '800' },
   rooms: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: { minHeight: 48, paddingHorizontal: 16, borderRadius: 24, borderWidth: 2, borderColor: '#fff', justifyContent: 'center' },
@@ -697,10 +767,10 @@ const styles = StyleSheet.create({
   small: { minHeight: 52, minWidth: 80, backgroundColor: '#2d6cff', borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   smallText: { color: '#fff', fontSize: 18, fontWeight: '700' },
   bottom: { gap: 12 },
-  talk: { minHeight: 180, borderRadius: 24, backgroundColor: '#2d6cff', alignItems: 'center', justifyContent: 'center' },
+  talkBackup: { minHeight: 64, borderRadius: 16, backgroundColor: '#333', alignItems: 'center', justifyContent: 'center' },
   talkOn: { backgroundColor: '#4dff88' },
   talkOff: { opacity: 0.45 },
   stop: { minHeight: 90, borderRadius: 24, backgroundColor: '#ff6b6b', alignItems: 'center', justifyContent: 'center' },
   stopText: { color: '#000', fontSize: 34, fontWeight: '800' },
-  bigText: { color: '#fff', fontSize: 34, fontWeight: '800' },
+  backupText: { color: '#ccc', fontSize: 18, fontWeight: '600' },
 });

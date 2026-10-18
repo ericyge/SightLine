@@ -128,7 +128,7 @@ def test_short_phrases_are_cached(eleven_env):
 def test_long_text_is_not_cached(eleven_env):
     calls = Calls()
     client = tts.ElevenLabsTTS(transport=calls.transport)
-    long_text = "word " * 30
+    long_text = "word " * 50
     client.speak(long_text)
     client.speak(long_text)
     assert len(calls.requests) == 2 and len(tts.CACHE) == 0

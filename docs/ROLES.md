@@ -42,8 +42,9 @@ Integration notes for B/C: real `confidence` is nullable; provider failures are 
 not `found:false`; boxes refer to the prepared upright frame. The importer writes memory but
 does not publish WebSocket events. Keep mock trials in a separate database from real trials.
 Sightings now include `id` and `place_id`; `/where` adds a nullable `destination` place.
-An unmapped newest sighting returns null even when an older one was mapped. Connections
-are executed as navigate cues when localization succeeds; facing and obstacles are unverified.
+Navigation falls back to the newest assigned place among recent sightings when the latest
+observation is unmapped. Connections are executed as navigate cues when localization
+succeeds; facing and obstacles are unverified.
 
 ## B: Guidance and Audio
 **Owns:** `backend/app/guidance.py`, `/api/guide`, `web/src/phone/audio.js`, `speech.js`, `orientation.js`.

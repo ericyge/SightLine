@@ -30,13 +30,38 @@ DEFAULT_BASE = "https://api.elevenlabs.io/v1"
 DEFAULT_MODEL = "eleven_flash_v2_5"
 OUTPUT_FORMAT = "mp3_44100_128"     # ElevenLabs' documented default; also the one that needs no paid tier
 MEDIA_TYPE = "audio/mpeg"           # the docs do not state a MIME type; we ask for mp3
-DEFAULT_TIMEOUT_S = 3.0
-MAX_CACHED_CHARS = 80               # only short, repeated phrases are cached
-CACHE_ENTRIES = 100
-MAX_CACHED_BYTES = 300_000
+DEFAULT_TIMEOUT_S = 5.0
+MAX_CACHED_CHARS = 180              # cache both short cues and multi-word navigation instructions
+CACHE_ENTRIES = 200
+MAX_CACHED_BYTES = 500_000
 
-# Fixed guidance cues (see backend/app/guidance.py). Pre-rendered at startup so they play instantly.
-PREWARM_PHRASES = ["Reach out now", "Stopped.", "Lost it. Turn slowly left.", "Lost it. Turn slowly right."]
+# Fixed guidance cues (see backend/app/guidance.py and main.py). Pre-rendered at startup so they play instantly.
+PREWARM_PHRASES = [
+    "Reach out now",
+    "Stopped.",
+    "Lost it. Turn slowly left.",
+    "Lost it. Turn slowly right.",
+    "Stop walking. Turn slowly right in place with your phone pointed ahead.",
+    "Turn left in place, then walk straight ahead.",
+    "Turn right in place, then walk straight ahead.",
+    "Walk straight ahead a few steps.",
+    "Stop walking. Reach straight in front of you.",
+    "Stop walking. Reach in front of you, slightly to your left.",
+    "Stop walking. Reach in front of you, slightly to your right.",
+    "Stop walking. Turn slightly left and reach in front of you.",
+    "Stop walking. Turn slightly right and reach in front of you.",
+    "Stop. Reach straight in front of you now.",
+    "Stop. Reach in front of you to your left.",
+    "Stop. Reach in front of you to your right.",
+    "Step forward and reach straight in front of you.",
+    "Turn slightly left and step forward.",
+    "Turn slightly right and step forward.",
+    "Turn left and step forward.",
+    "Turn right and step forward.",
+    "Walk straight ahead.",
+    "Turn left.",
+    "Turn right.",
+]
 
 
 class TTSError(Exception):
