@@ -8,6 +8,8 @@ export type Health = {
   ok: boolean; mode: string; mock: boolean; stt: 'elevenlabs' | 'browser';
   vision: { calls: number; p50_ms: number | null; p95_ms: number | null; errors: number; dropped: number } | null;
   guide_max_fps: number;
+  tts: 'elevenlabs' | 'browser';          // elevenlabs: speak chat replies via /api/speak
+  tts_guidance: 'cached' | 'never';       // whether fixed guidance cues may use cached ElevenLabs audio
 };
 export type Profile = { watchlist: { name: string }[]; rooms: string[]; guidance_style: string };
 export type GuideResponse = {
@@ -68,6 +70,28 @@ export class Api {
     body.append('item', item);
     if (typeof yawDeg === 'number') body.append('yaw_deg', String(yawDeg));
     return this.send<GuideResponse | null>('/api/guide', { method: 'POST', body });
+  }
+
+  /**
+   * mp3 bytes for a reply from POST /api/speak. Resolves null when `cachedOnly` and nothing is cached
+   * (HTTP 204). Rejects on any failure or timeout so the caller can use the built-in voice.
+   */
+  async speak(text: string, cachedOnly: boolean, timeoutMs: number): Promise<Uint8Array | null> {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      const res = await fetch(this.url(`/api/speak${cachedOnly ? '?cached_only=true' : ''}`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': '1' },
+        body: JSON.stringify({ text }),
+        signal: ctl.signal,
+      });
+      if (res.status === 204) return null;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return new Uint8Array(await res.arrayBuffer());
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   transcribe(audio: UploadFile) {

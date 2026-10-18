@@ -12,6 +12,7 @@ import { Api, type ChatResponse, type ChatTurn, type GuideResponse, type UploadF
 import { playBeep, prepareBeeps, releaseBeeps } from './beeps';
 import { compensate, panFromAngle, pitchBoost } from './guidance';
 import { getYaw, startOrientation, stopOrientation } from './orientation';
+import { configureVoice, releaseVoice, voice } from './voice';
 import { guideIntervalMs, waitMs } from './pacing';
 
 const LOOP_MS = 1000;
@@ -57,7 +58,7 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
     prepareBeeps();
     void setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false });
     void startOrientation();
-    return () => { releaseBeeps(); stopOrientation(); void Speech.stop(); };
+    return () => { releaseBeeps(); releaseVoice(); stopOrientation(); void Speech.stop(); };
   }, []);
 
   const [attempt, setAttempt] = useState(0);
@@ -72,6 +73,7 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
         setConnected(true);
         setMock(health.mock);
         setStt(health.stt);
+        configureVoice(api, health);   // ElevenLabs voice on/off and the guidance-cue setting
         guideMs.current = guideIntervalMs(health.guide_max_fps);
         setRooms(profile.rooms);
         setRoom((r) => (profile.rooms.includes(r) ? r : profile.rooms[0] ?? r));
@@ -125,7 +127,7 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
           // null = 204: the backend dropped this frame (still busy). Keep the last result.
           if (r) {
             guideRef.current = { last: r, yawAtLast: yaw, at: Date.now() };
-            if (r.say) { say(r.say, true); setCue(r.say); }
+            if (r.say) { void voice.cue(r.say); setCue(r.say); }
           }
         } catch {
           setStatus('Connection problem. Still trying.');
@@ -153,7 +155,7 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
     setGuiding(null);
     setCue('');
     setStatus('Guidance stopped.');
-    say('Stopped', true);
+    void voice.cue('Stopped.');
   }, []);
 
   const apply = useCallback((r: ChatResponse) => {
@@ -163,7 +165,7 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
     if (r.intent === 'find' && r.item) setGuiding(r.item);
     if (r.intent === 'set_room' && r.room) setRoom(r.room);
     setStatus(r.say);
-    say(r.say, true);
+    void voice.reply(r.say);   // ElevenLabs voice when enabled, built-in voice on any failure
   }, [stopGuidance]);
 
   const runCommand = useCallback(async (text: string) => {
@@ -183,6 +185,7 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
     setListening(true);
     setStatus('Listening…');
     Speech.stop();
+    voice.stop();   // do not talk over the user
     const ready = (async () => {
       const perm = await requestRecordingPermissionsAsync();
       if (!perm.granted) { setStatus('Microphone permission is needed to talk.'); return false; }
