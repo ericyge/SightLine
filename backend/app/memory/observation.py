@@ -110,7 +110,34 @@ def resolve_frame(c, detections, room, context):
     return results
 
 
-def observe_and_save(vision, frame, room, ts, *, place_id=None, auto_place=True, session_id=None, hints=None):
+REPEAT_WINDOW_SECONDS = 15
+
+
+def refresh_repeat(c, item, assignment, spot, box, confidence, ts, session_id):
+    """Refresh only the newest, confidently assigned sighting in this live capture session."""
+    if not session_id or not assignment["place_id"] or not spot.strip():
+        return None
+    row = c.execute("SELECT * FROM sightings WHERE item=? ORDER BY julianday(ts) DESC,id DESC LIMIT 1",
+                    (item,)).fetchone()
+    if row is None or any(row[key] != value for key, value in {
+        "session_id": session_id, "place_id": assignment["place_id"],
+        "place_source": assignment["place_source"], "room": assignment["room"],
+    }.items()) or _normalized(row["spot"]) != _normalized(spot):
+        return None
+    when = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    when = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+    previous = datetime.fromisoformat(row["ts"].replace("Z", "+00:00"))
+    previous = previous if previous.tzinfo else previous.replace(tzinfo=timezone.utc)
+    if not 0 <= (when - previous).total_seconds() <= REPEAT_WINDOW_SECONDS:
+        return None
+    # Keep the first crop as a representative image; do not create one JPEG per repeat.
+    c.execute("""UPDATE sightings SET ts=?,spot=?,x1=?,y1=?,x2=?,y2=?,confidence=?,place_reason=?
+                 WHERE id=?""", (when.astimezone(timezone.utc).isoformat(), spot, *box, confidence,
+                                 assignment["place_reason"], row["id"]))
+    return db.sighting_record(c.execute("SELECT * FROM sightings WHERE id=?", (row["id"],)).fetchone())
+
+
+def observe_and_save(vision, frame, room, ts, *, place_id=None, auto_place=True, session_id=None, hints=None, coalesce=False):
     """One inference call; atomically save new places and sightings; persist only object crops."""
     room = room.strip() if room and room.strip() else None
     explicit = memory.validate_place(place_id, room)
@@ -135,6 +162,11 @@ def observe_and_save(vision, frame, room, ts, *, place_id=None, auto_place=True,
                     "place_id": place_id, "room": room or UNKNOWN_ROOM,
                     "place_source": "manual" if explicit else "none",
                     "place_reason": "Explicit place override." if explicit else "Automatic assignment disabled."}
+                repeated = refresh_repeat(c, item_name, assignment, d.spot, d.box, d.confidence,
+                                          ts, session_id) if coalesce else None
+                if repeated is not None:
+                    sightings.append(repeated)
+                    continue
                 thumb = db.save_thumb(frame, d.box)
                 if thumb:
                     crops.append(db.thumbs_dir() / Path(thumb).name)

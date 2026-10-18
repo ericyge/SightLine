@@ -37,7 +37,9 @@ def test_apply_survey_creates_place_and_connection(client):
     second = apply_survey(PlaceSurveyResult(
         decision="new", name="kitchen counter", room="kitchen",
         description="Counter by the sink.", landmarks=["sink", "cabinets"],
-        instruction_from_previous="Walk to the kitchen counter.", reason="test"),
+        instruction_from_previous="Walk to the kitchen counter.", reason="test",
+        transition_observed=True, departure_view="Facing kitchen from doorway.",
+        arrival_view="Facing sink."),
         previous_place_id=first.place_id)
     assert second.connection_added
     saved = memory.get_map()

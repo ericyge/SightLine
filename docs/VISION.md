@@ -179,3 +179,32 @@ checked and appear consistent with their labels. Median inference was 469.9 ms, 
 1214.9 ms first call. This small trial does not establish general accuracy or phone guidance latency.
 The supplied room was `test_room`; recording time came from the clip metadata. Full results:
 [per-frame JSON](../backend/test_videos/room_scan_1.results.jsonl).
+
+## Live calibration and open-vocabulary check
+
+[CALIBRATION.md](CALIBRATION.md) describes the native live workflow. Place surveys now compare
+recent consecutive images and require transition evidence, instruction, and departure/arrival
+views before saving an edge. Object memory is a separate open-vocabulary `observe` call; it does
+not copy the camera's location onto every visible object. Use `PERCEPTRON_MODE=perceptron` for
+real calibration. `live` is detect-only, and its memory detections are watchlist-limited.
+
+The full observation prompt explicitly allows everyday objects beyond the watchlist and examples.
+A conflicting old empty-result instruction was removed. Check the SDK adapter, saving, and recall:
+
+```bash
+../venv/bin/python -m pytest tests/test_vision.py -k open_vocabulary -q -s
+```
+
+This uses offline provider responses, including a cup and stapler absent from the watchlist,
+through `/api/calibration/frame`; it is not a live model accuracy benchmark. To check real vision,
+place an off-watchlist object such as a stapler clearly on a surface during calibration and inspect
+“Objects in latest frame” in the app or `/api/where?item=stapler`. Missing place evidence can leave
+its destination unassigned while still saving the object detection.
+
+## Facing during navigation
+
+The full client now checks the selected departure view in its localization response when the
+caller supplies route departures. The response uses a required categorical facing status; no
+confidence or turn angle is invented. The existing SDK chat/schema path is reused. Offline
+provider tests pass; acceptance and accuracy of this new schema on live Perceptron are unverified.
+See [NAVIGATION_TRIAL.md](NAVIGATION_TRIAL.md).

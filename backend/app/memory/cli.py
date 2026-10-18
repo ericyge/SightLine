@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from .. import db
 from . import store as memory
 from .models import MemoryMapUpdate, SightingPlaceUpdate
-from .route import directions_to_item, infer_place_for_sighting
+from .route import directions_to_item
 
 
 def parser() -> argparse.ArgumentParser:
@@ -21,10 +21,10 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("items", help="Show the latest sighting and destination of watched and seen items")
     where = commands.add_parser("where", help="Show one item's five latest sightings, destination, and directions")
     where.add_argument("item")
-    where.add_argument("--from-place", help="Current place ID to route from (defaults to latest place)")
+    where.add_argument("--from-place", help="Known current place ID; directions are omitted without it")
     dirs = commands.add_parser("directions", help="Print step-by-step directions to reach an item")
     dirs.add_argument("item")
-    dirs.add_argument("--from-place", help="Current place ID to route from (defaults to latest place)")
+    dirs.add_argument("--from-place", help="Known current place ID; directions are omitted without it")
     assign = commands.add_parser("assign", help="Link one saved sighting to a taught place")
     assign.add_argument("sighting_id", type=int)
     target = assign.add_mutually_exclusive_group(required=True)

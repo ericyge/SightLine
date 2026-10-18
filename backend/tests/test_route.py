@@ -53,14 +53,9 @@ def test_plan_route_accepts_explicit_graph(client):
     assert plan.status == "ok" and plan.next_hop.instruction == "walk to b"
 
 
-def test_plan_route_allow_reverse_and_directions_to_item(client):
+def test_directions_to_item_uses_saved_forward_route(client):
     from app import db
     teach_two_room()
-    rev = memory.plan_route("kitchen_counter", "bedroom_door", allow_reverse=True)
-    assert rev.status == "ok"
-    assert rev.path == ["kitchen_counter", "kitchen_entry", "bedroom_door"]
-    assert rev.hops[0].inferred_reverse is True
-
     db.add_sighting("keys", "kitchen", "on the counter", [.1, .2, .3, .4], None,
                     "2026-10-17T20:00:00Z", "", place_id="kitchen_counter")
     info = memory.directions_to_item("keys", from_place_id="bedroom_door")
@@ -72,6 +67,7 @@ def test_plan_route_allow_reverse_and_directions_to_item(client):
     assert len(info["hops"]) == 2
     assert info["hops"][0]["to_place_id"] == "kitchen_entry"
     assert info["hops"][1]["to_place_id"] == "kitchen_counter"
+    assert all(hop["inferred_reverse"] is False for hop in info["hops"])
 
     res = client.get("/api/memory/directions", params={"item": "keys", "from_place": "bedroom_door"})
     assert res.status_code == 200

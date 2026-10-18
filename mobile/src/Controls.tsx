@@ -7,8 +7,9 @@ import {
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as Speech from 'expo-speech';
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, Vibration, View } from 'react-native';
-import { Api, type ChatResponse, type ChatTurn, type GuideResponse, type UploadFile } from './api';
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, Vibration, View } from 'react-native';
+import { Api, type CalibrationStatus, type ChatResponse, type ChatTurn, type GuideResponse, type UploadFile } from './api';
+import { calibrationCommand, observationSession, prepareLearningReply } from './calibration';
 import { playBeep, prepareBeeps, releaseBeeps } from './beeps';
 import { CameraWatchdog, SingleFlight } from './capture';
 import {
@@ -59,7 +60,19 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   const [wakeOn, setWakeOn] = useState(true);                   // the user's switch
   const [wakeBusy, setWakeBusy] = useState(false);              // handling a wake request, or its reply is playing
   const [rooms, setRooms] = useState<string[]>(['bedroom', 'kitchen', 'living room']);
-  const [room, setRoom] = useState('bedroom');
+  const [room, setRoom] = useState('');  // Automatic: never constrain a walk to the first profile room.
+  const [sessionId] = useState(observationSession);
+  const [calibration, setCalibration] = useState<CalibrationStatus | null>(null);
+  const calibrationRef = useRef<CalibrationStatus | null>(null);
+  const [calibrationBusy, setCalibrationBusy] = useState(false);
+  const calibrationActionRef = useRef(false);
+  const commandInFlight = useRef(false);
+  const [commandBusy, setCommandBusy] = useState(false);
+  const resumeLearning = useRef(false);
+  const pendingFrame = useRef<Promise<unknown> | null>(null);
+  const calibrationSequence = useRef(0);
+  const calibrationFailed = useRef(false);
+  const memoryWarned = useRef(false);
   const [status, setStatus] = useState('Set the server address to begin.');
   const [cue, setCue] = useState('');
   const [guiding, setGuiding] = useState<string | null>(null);
@@ -67,7 +80,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   const [typed, setTyped] = useState('');
   const [memStats, setMemStats] = useState<LoopStats>(emptyStats);     // /api/observe frames
   const [guideStats, setGuideStats] = useState<LoopStats>(emptyStats);   // /api/guide frames
-  const [showDebug, setShowDebug] = useState(true);
+  const [showDebug, setShowDebug] = useState(false);
   const [testResult, setTestResult] = useState('');                   // result of the one-tap camera test
   const pausedRef = useRef(false);                                    // loops pause while the test runs
   const [restarts, setRestarts] = useState(0);                            // automatic camera restarts
@@ -104,13 +117,22 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   }, []);
 
   const [attempt, setAttempt] = useState(0);
-  const connect = () => setAttempt((n) => n + 1);
+  const resetConnection = () => {
+    setConnected(false);
+    calibrationRef.current = null;
+    setCalibration(null);
+  };
+  const changeServer = (value: string) => { resetConnection(); setServer(value); };
+  const connect = () => { resetConnection(); setAttempt((n) => n + 1); };
   useEffect(() => {
     if (!server) return;
     let cancelled = false;
     (async () => {
       try {
-        const [health, profile] = await Promise.all([api.health(), api.profile()]);
+        const [health, profile, savedCalibration] = await Promise.all([api.health(), api.profile(), api.calibration()]);
+        if (cancelled) return;
+        const restored = savedCalibration.available
+          ? await api.startCalibration() : savedCalibration;
         if (cancelled) return;
         setConnected(true);
         saveServer(server);   // remember it for the next reload
@@ -120,10 +142,16 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
         configureVoice(api, health);   // ElevenLabs voice on/off and the guidance-cue setting
         guideMs.current = guideIntervalMs(health.guide_max_fps);
         setRooms(profile.rooms);
-        setRoom((r) => (profile.rooms.includes(r) ? r : profile.rooms[0] ?? r));
-        setStatus(health.stt === 'elevenlabs'
-          ? 'Ready. Hold the button and speak.'
-          : 'Ready. Voice needs the server speech key; type your request.');
+        setRoom((r) => (profile.rooms.includes(r) ? r : ''));
+        calibrationRef.current = restored;
+        calibrationSequence.current = restored.last_sequence;
+        setCalibration(restored);
+        setStatus(restored.status === 'mapping'
+          ? 'Learning your apartment in the background. Ask about an object anytime.'
+          : 'Ready. Apartment learning needs the full Perceptron mode.');
+        if (restored.status === 'mapping') {
+          void voice.cue('I’ll remember objects and learn your apartment as you move around. Ask me about an object anytime.');
+        }
       } catch {
         if (cancelled) return;
         setConnected(false);
@@ -175,32 +203,68 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     (async () => {
       while (!cancelled) {
         memBeat.current = Date.now();
-        if (pausedRef.current || !cameraUsable()) { await sleep(250); continue; }
+        if (pausedRef.current || !cameraUsable()
+            || (calibrationRef.current?.status === 'idle' && !calibrationRef.current.places.length)) {
+          await sleep(250); continue;
+        }
         const t0 = Date.now();
         let result: Result;
+        let task: Promise<unknown> | null = null;
         try {
-          const r = await api.observe(await captureFrame(), roomRef.current);
+          task = (async () => {
+            const frame = await captureFrame();
+            if (cancelled) return null;
+            const active = calibrationRef.current;
+            if (active?.status === 'mapping' && active.session_id) {
+              const next = await api.calibrationFrame(frame, active.session_id,
+                ++calibrationSequence.current, new Date().toISOString());
+              if (!cancelled) {
+                calibrationRef.current = next;
+                setCalibration(next);
+                if (next.memory_warning) {
+                  const warning = 'Mapping continues, but object memory could not process this frame.';
+                  setStatus(warning);
+                  if (!memoryWarned.current) void voice.cue(warning);
+                }
+                if (!next.memory_warning && calibrationFailed.current) void voice.cue('Apartment learning has resumed.');
+                memoryWarned.current = !!next.memory_warning;
+                calibrationFailed.current = false;
+              }
+              return next;
+            }
+            return api.observe(frame, roomRef.current, sessionId);
+          })();
+          pendingFrame.current = task;
+          const r = await task;
           result = { kind: r ? 'ok' : 'dropped', at: Date.now(), ms: Date.now() - t0 };
         } catch (e) {
+          if (!cancelled && calibrationRef.current?.status === 'mapping') {
+            setStatus(`Apartment learning failed: ${errorText(e)}. Still trying.`);
+            if (!calibrationFailed.current) void voice.cue('Apartment learning could not process this view. I’ll keep trying.');
+            calibrationFailed.current = true;
+          }
           result = {
             kind: 'failed', at: Date.now(), ms: Date.now() - t0, error: errorText(e),
             stage: e instanceof StageError ? e.stage : 'upload',
           };
+        } finally {
+          if (pendingFrame.current === task) pendingFrame.current = null;
         }
         if (cancelled) break;
         setMemStats((st) => record(st, result));
         afterAttempt(result);
-        await sleep(Math.max(0, LOOP_MS - (Date.now() - t0)));
+        await sleep(Math.max(0, (calibrationRef.current?.status === 'mapping' ? 2000 : LOOP_MS) - (Date.now() - t0)));
       }
     })();
     return () => { cancelled = true; };
-  }, [api, connected, guiding, captureFrame, afterAttempt]);
+  }, [api, connected, guiding, captureFrame, afterAttempt, sessionId]);
 
   // Guidance: as fast as the backend answers, capped (GUIDE_MAX_FPS), one request in flight and never
   // queued; plus a fast local loop that plays the beeps and keeps the pan right between answers.
   useEffect(() => {
     if (!guiding) return;
     let cancelled = false;
+    let guidanceFailed = false;
     (async () => {
       while (!cancelled) {
         if (pausedRef.current || !cameraUsable()) { await sleep(250); continue; }
@@ -213,10 +277,18 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
           // null = 204: the backend dropped this frame (still busy). Keep the last result.
           if (r) {
             guideRef.current = { last: r, yawAtLast: yaw, at: Date.now() };
-            if (r.say) { void voice.cue(r.say); setCue(r.say); }
+            const spoken = r.say || (guidanceFailed ? r.next_instruction || 'Camera updates have resumed.' : '');
+            if (spoken) { void voice.cue(spoken); setCue(spoken); }
+            guidanceFailed = false;
           }
           result = { kind: r ? 'ok' : 'dropped', at: Date.now(), ms: Date.now() - t0 };
         } catch (e) {
+          if (cancelled) break;
+          guideRef.current = { last: null, yawAtLast: null, at: 0 };
+          const warning = 'Pause walking. I cannot check the camera view. Retrying.';
+          if (!guidanceFailed) void voice.cue(warning);
+          guidanceFailed = true;
+          setCue(warning);
           setStatus('Connection problem. Still trying.');
           result = {
             kind: 'failed', at: Date.now(), ms: Date.now() - t0, error: errorText(e),
@@ -276,21 +348,77 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
       .slice(-HISTORY_TURNS);
     if (r.intent === 'stop') return stopGuidance();
     if (r.intent === 'find' && r.item) setGuiding(r.item);
+    if (r.intent === 'where') { setGuiding(null); setCue(''); }
     if (r.intent === 'set_room' && r.room) setRoom(r.room);
     setStatus(r.say);
     await voice.reply(r.say);   // ElevenLabs voice when enabled, built-in voice on any failure
   }, [stopGuidance]);
 
+  const changeCalibration = useCallback(async (action: 'start' | 'finish', quiet = false): Promise<boolean> => {
+    if (!connected || calibrationActionRef.current || guiding || testing) return false;
+    calibrationActionRef.current = true;
+    pausedRef.current = true;
+    setCalibrationBusy(true);
+    try {
+      // Let the single frame already in flight settle before starting/finishing its session.
+      await pendingFrame.current?.catch(() => undefined);
+      const active = calibrationRef.current;
+      if (action === 'finish' && (!active?.session_id || active.status !== 'mapping')) return true;
+      const next = action === 'start' ? await api.startCalibration()
+        : await api.finishCalibration(active!.session_id!);
+      calibrationRef.current = next;
+      calibrationSequence.current = next.last_sequence;
+      setCalibration(next);
+      setRoom('');
+      if (!quiet) { setStatus(next.say); void voice.reply(next.say); }
+      return true;
+    } catch (e) {
+      const message = `Apartment learning: ${errorText(e)}`;
+      setStatus(message);
+      void voice.reply(message);
+      return false;
+    } finally {
+      pausedRef.current = commandInFlight.current;
+      calibrationActionRef.current = false;
+      setCalibrationBusy(false);
+    }
+  }, [api, connected, guiding, testing]);
+
+  // Guidance owns the camera while active; restart learning with fresh continuity on stop.
+  useEffect(() => {
+    if (!resumeLearning.current || guiding || commandBusy || !connected) return;
+    resumeLearning.current = false;
+    void changeCalibration('start', true);
+  }, [guiding, commandBusy, connected, changeCalibration]);
+
   const runCommand = useCallback(async (text: string) => {
+    if (commandInFlight.current || calibrationActionRef.current) return;
+    const command = calibrationCommand(text);
+    if (command) return changeCalibration(command);
+    commandInFlight.current = true;
+    setCommandBusy(true);
+    pausedRef.current = true;
     history.current = [...history.current, { role: 'user' as const, content: text.slice(0, 500) }]
       .slice(-HISTORY_TURNS);
     try {
-      await apply(await api.chat(text, history.current.slice(0, -1), roomRef.current));
+      const reply = await prepareLearningReply(pendingFrame.current,
+        () => api.chat(text, history.current.slice(0, -1), roomRef.current),
+        async () => {
+          if (calibrationRef.current?.status !== 'mapping') return true;
+          const saved = await changeCalibration('finish', true);
+          if (saved) resumeLearning.current = true;
+          return saved;
+        });
+      await apply(reply);
     } catch {
-      setStatus('Could not reach the server.');
-      void voice.reply('I could not reach the server.');
+      setStatus('Could not complete the request. Please try again.');
+      void voice.reply('I could not complete that request. Please try again.');
+    } finally {
+      commandInFlight.current = false;
+      pausedRef.current = false;
+      setCommandBusy(false);
     }
-  }, [api, apply]);
+  }, [api, apply, changeCalibration]);
 
   // ---- "Hey Jarvis": hands-free start of the same listening flow ----
   // iOS: while the wake word streams the microphone nothing can play, so it is only on when the app is
@@ -409,6 +537,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     if (guiding) return { text: 'off while guiding', bad: false };
     if (!connected) return { text: 'NOT STARTED: backend not connected', bad: true };
     if (testing) return { text: 'paused for the test photo', bad: false };
+    if (calibration?.status === 'idle' && !calibration.places.length) return { text: 'waiting for calibration', bad: false };
     if (beat === 0) return { text: 'starting...', bad: false };
     const idle = Math.round((now - beat) / 1000);
     return idle > 3 ? { text: `STOPPED (last tick ${idle}s ago)`, bad: true } : { text: 'running', bad: false };
@@ -416,19 +545,44 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
 
   return (
     <View style={styles.overlay} pointerEvents="box-none">
-      <View style={styles.panel}>
+      <ScrollView style={styles.panelScroll} contentContainerStyle={styles.panel}>
         {mock && <Text style={styles.badge}>MOCK MODE: fake detections</Text>}
         <Text style={styles.status} accessibilityLiveRegion="polite">{status}</Text>
+        <View style={styles.calibration}>
+          <Text style={styles.calibrationText}>
+            {guiding ? 'Learning paused while guiding' : calibration?.status === 'mapping' ? 'Learning in the background' : 'Apartment memory'}
+          </Text>
+          <Text style={styles.chipText}>
+            {calibration ? `${calibration.places.length} places · ${calibration.connections_total} connections` : 'Connect to begin.'}
+          </Text>
+          {calibration?.status === 'mapping' && <Text style={styles.chipText}>
+            Objects in latest frame: {calibration.sightings.map((s) => s.item).join(', ') || 'none'}
+          </Text>}
+          {calibration?.places.length ? <Text style={styles.chipText}>
+            {calibration.coverage_ready ? 'Return paths recorded between mapped places.' : 'More views or return paths needed.'}
+          </Text> : null}
+          {showDebug && <Pressable onPress={() => void changeCalibration(calibration?.status === 'mapping' ? 'finish' : 'start')}
+            disabled={!connected || calibrationBusy || testing || !!guiding || !calibration?.available}
+            accessibilityRole="button" accessibilityState={{ disabled: !connected || calibrationBusy || testing || !!guiding || !calibration?.available, busy: calibrationBusy }}
+            accessibilityLabel={calibration?.status === 'mapping' ? 'Finish calibration' : calibration?.places.length ? 'Continue calibration' : 'Start calibration'}
+            style={styles.small}>
+            <Text style={styles.smallText}>{calibrationBusy ? 'Saving…' : calibration?.status === 'mapping'
+              ? 'Finish calibration' : calibration?.places.length ? 'Continue calibration' : 'Start calibration'}</Text>
+          </Pressable>}
+          {calibration && !calibration.available && <Text style={styles.chipText}>
+            Calibration is unavailable with the current server vision mode.
+          </Text>}
+        </View>
         {guiding && <Text style={styles.cue}>{cue || `Searching for ${guiding}…`}</Text>}
-        <View style={styles.rooms} accessibilityRole="radiogroup">
-          {rooms.map((r) => (
+        {calibration?.status !== 'mapping' && <View style={styles.rooms} accessibilityRole="radiogroup">
+          {['', ...rooms].map((r) => (
             <Pressable key={r} onPress={() => setRoom(r)} accessibilityRole="radio"
-              accessibilityState={{ selected: r === room }} accessibilityLabel={`Room ${r}`}
+              accessibilityState={{ selected: r === room }} accessibilityLabel={r ? `Room ${r}` : 'Automatic room recognition'}
               style={[styles.chip, r === room && styles.chipOn]}>
-              <Text style={[styles.chipText, r === room && styles.chipTextOn]}>{r}</Text>
+              <Text style={[styles.chipText, r === room && styles.chipTextOn]}>{r || 'Automatic'}</Text>
             </Pressable>
           ))}
-        </View>
+        </View>}
         {showDebug && (
           // Debug counters for sighted helpers; hidden from screen readers so they are not read aloud.
           <View style={styles.debug} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
@@ -467,7 +621,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
             <Text style={styles.linkText}>Hey Jarvis: {wakeOn ? 'ON (tap to turn off)' : 'OFF (tap to turn on)'}</Text>
           </Pressable>
         )}
-        <Pressable onPress={testPhoto} accessibilityRole="button" accessibilityLabel="Test one photo" style={styles.link}>
+        <Pressable onPress={testPhoto} disabled={calibrationBusy || testing} accessibilityRole="button" accessibilityLabel="Test one photo" style={styles.link}>
           <Text style={styles.linkText}>Test one photo (camera check)</Text>
         </Pressable>
         <Pressable onPress={() => setShowDebug((d) => !d)} accessibilityRole="button"
@@ -480,15 +634,15 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
         </Pressable>
         {showSettings && (
           <View style={styles.settings}>
-            <TextInput value={server} onChangeText={setServer} autoCapitalize="none" autoCorrect={false}
+            <TextInput value={server} onChangeText={changeServer} editable={!calibrationBusy} autoCapitalize="none" autoCorrect={false}
               placeholder="http://192.168.x.x:8000 or https://….ngrok-free.app" placeholderTextColor="#999"
               accessibilityLabel="Server address" style={styles.input} onSubmitEditing={connect} />
-            <Pressable onPress={connect} accessibilityRole="button" accessibilityLabel="Connect" style={styles.small}>
+            <Pressable onPress={connect} disabled={calibrationBusy} accessibilityRole="button" accessibilityLabel="Connect" style={styles.small}>
               <Text style={styles.smallText}>Connect</Text>
             </Pressable>
           </View>
         )}
-      </View>
+      </ScrollView>
 
       <View style={styles.bottom}>
         {stt !== 'elevenlabs' && (
@@ -522,6 +676,9 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
 const styles = StyleSheet.create({
   overlay: { ...StyleSheet.absoluteFill, justifyContent: 'space-between', padding: 12 },
   panel: { backgroundColor: 'rgba(0,0,0,0.72)', borderRadius: 14, padding: 14, gap: 10, marginTop: 36 },
+  panelScroll: { flexShrink: 1, marginBottom: 12 },
+  calibration: { gap: 8, paddingVertical: 8 },
+  calibrationText: { color: '#fff', fontSize: 22, fontWeight: '700' },
   badge: { alignSelf: 'flex-start', backgroundColor: '#ffe14d', color: '#000', fontWeight: '800', padding: 6, borderRadius: 6 },
   status: { color: '#fff', fontSize: 22, lineHeight: 30 },
   cue: { color: '#ffe14d', fontSize: 30, fontWeight: '800' },

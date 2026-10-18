@@ -14,9 +14,11 @@ Stored records:
 Endpoints:
   POST /api/observe   multipart: frame (JPEG), room (optional string), ts (optional ISO), place_id (optional taught place ID), auto_place (optional bool, default true), session_id (optional PlaceID string)
       -> { sightings: [sighting...] }   saves sightings found in this frame, pushes an event to /ws/events
-  GET  /api/where?item=wallet
-      -> { item, found:true, last: { room, spot, minutes_ago, thumb, confidence }, history: [ ... up to 5 ... ], destination: place|null, say: "In your bedroom, on the desk, next to the lamp, about 4 minutes ago." }
-      -> HTTP 200 { item, found:false, last:null, history:[], destination:null, say:"I haven't seen your wallet yet." } if watched but never seen
+  GET  /api/where?item=wallet&from_place=bedroom_door   from_place is optional
+      -> { item, found:true, last: { room, spot, minutes_ago, thumb, confidence }, history: [ ... up to 5 ... ], destination: place|null, directions:[string...], say: "In your bedroom, on the desk, next to the lamp, about 4 minutes ago." }
+      -> HTTP 200 { item, found:false, last:null, history:[], destination:null, directions:[], say:"I don't know where your wallet is yet. I haven't seen it." } if never seen
+  GET  /api/memory/directions?item=wallet&from_place=bedroom_door   from_place is optional
+      -> { item, found, status, current_place:place|null, destination:place|null, path:[place_id...], steps:[string...], hops:[{from_place_id,to_place_id,instruction,departure_view,arrival_view,inferred_reverse:false}...], say }
   GET  /api/memory/map -> { places:[place...], connections:[connection...] }
   POST /api/memory/map JSON: { places:[place...], connections:[connection...] }
       -> full merged map; omitted records retained, no deletions
@@ -25,7 +27,7 @@ Endpoints:
       -> updated sighting; null clears only this link
   POST /api/guide     multipart: frame (JPEG), item (string), yaw_deg (optional float)
       -> { found, point:[x,y], box:[x1,y1,x2,y2], angle, clock, distance ("far"|"near"|"reach"), pan, say, beep_ms,
-           mode ("visual"|"navigate"|"lost"), current_place (place_id|null), destination (place|null), next_instruction (string|null) }
+           mode ("visual"|"navigate"|"lost"), current_place (place_id|null), destination (place|null), next_instruction (string|null), departure_status ("aligned"|"left"|"right"|"blocked"|"unknown"|null) }
       visual e.g. { "found": true, "point": [0.71, 0.62], "box": [0.66,0.55,0.77,0.69], "angle": 13.7, "clock": 12,
         "distance": "near", "pan": 0.46, "say": "Wallet slightly right, almost in reach", "beep_ms": 350,
         "mode": "visual", "current_place": null, "destination": {...}|null, "next_instruction": null }
@@ -76,13 +78,30 @@ never substitutes for an observation. Historical observations are sorted by time
 with sighting ID breaking ties; new writes use UTC. The latest sighting ID is in `history[0].id`.
 
 Places can be explicitly taught or automatically discovered from object sightings; connections
-are always explicitly taught, directed, and do not imply a reverse path.
+are saved by map teaching or the recorded-video walkthrough mapper. They are directed and do
+not imply a reverse path. Return travel requires separately saved connections for that direction.
 `departure_view` and `arrival_view` store the facing/view context for that direction.
 Map updates are atomic merges, not replacements. A place ID cannot change rooms. Profile
 updates retain places and sightings; only currently watched items are returned by item lookup.
 `/api/guide` localizes the camera against taught places and plans a directed BFS route when the
-target item is not visible and the newest sighting has a destination. Obstacle detection and
-ElevenLabs are not implemented.
+target item is not visible and the newest sighting has a destination. Facing is checked against the next recorded departure view before speaking a walking instruction.
+Continuous obstacle avoidance is not implemented. Speech support is described in the text-to-speech section below.
+
+`/api/memory/directions` and CLI `directions` return `status` of `ok`, `already_there`,
+`item_not_seen`, `unknown_destination`, `unknown_current`, or `no_path`. `found` means a
+sighting exists, not that a route exists. Only the newest sighting's saved `place_id` supplies
+the destination: neither an older assignment, a place name in `spot`, a generic surface name,
+nor a sole mapped place in the room substitutes for it. `from_place` must identify a known
+place to get directions; omitted, empty, or unknown IDs yield `unknown_current` when the
+destination is known. Map order never establishes the user's location. These read-only
+endpoints do not perform camera localization; `/api/guide` does.
+
+`steps` and `hops` are empty unless status is `ok` or `already_there` (the latter has an
+arrival step but no hops). `path` is empty for unknown places or an unseen item, and contains
+only the starting ID for `no_path`. `/api/where.directions` uses the same rules and is empty
+without a known start and a mapped destination/path. Its `say` remains a last-seen description.
+The existing `inferred_reverse` hop field is retained and is always false; instructions are
+never generated by swapping left/right or assuming the user should turn around.
 
 Validation: place IDs match `[a-z0-9][a-z0-9_-]{0,79}`; names/rooms/landmarks are nonblank,
 trimmed strings up to 160 characters; descriptions/view context/instructions are nonblank,
@@ -120,15 +139,15 @@ The notes below specify additional behavior; update both when behavior changes.
 - **Vision failures:** HTTP 503 `{detail: ...}` for provider errors, timeouts, incomplete replies, or invalid labels. No sightings are saved for a failed frame. A successful empty list means no current detection, and never deletes previous sightings. The client never falls back to mock on an error.
 - **Timestamps:** new `/api/observe` timestamps are normalized to UTC; invalid ISO timestamps return 422. The video importer requires a recording start time with a zone and adds each frame's presentation offset. Existing naive API timestamps are still treated as UTC.
 
-- **`/api/where` never returns HTTP 404.** Never-seen is `200 {item, found:false, last:null, history:[], destination:null, say:"I haven't seen your wallet yet."}` for both profile watchlist items and open-vocabulary objects (e.g. `"water bottle"`, `"cup"`). Found responses include `found:true`.
+- **`/api/where` never returns HTTP 404.** Never-seen is `200 {item, found:false, last:null, history:[], destination:null, say:"I don't know where your wallet is yet. I haven't seen it."}` for both profile watchlist items and open-vocabulary objects (e.g. `"water bottle"`, `"cup"`). Found responses include `found:true`.
 - **`/api/where` `say` wording:** unassigned sightings retain `"In your bedroom, on the desk, next to the lamp, about 4 minutes ago."` (room + spot), or `"Last seen on the desk, next to the lamp, about 4 minutes ago."` when `room` is `"unknown room"`. Assigned sightings use `"Last seen at counter beside the sink in your kitchen, about 4 minutes ago."` (omitting `"in your unknown room"` when the place's room is `"unknown room"`). `history` entries are full sighting records, newest first. `minutes_ago` is a float.
 - **`item` matching & open-vocabulary:** names, watchlist aliases, and common everyday object synonyms (`cup`/`mug`/`coffee cup`/`tumbler`, `water bottle`/`bottle`/`thermos`, `bag`/`backpack`/`purse`, `headphones`/`earbuds`/`airpods`, `cane`/`white cane`, etc.) are case-insensitive; `"my"`/`"the"`/`"a"`/`"an"` prefixes and a trailing plural `"s"` are ignored (`"my meds"` -> `medication`, `"my mug"` -> `cup`, `"my bottle"` -> `water bottle`). `/api/observe` detects both watchlist items and any other visible everyday personal/household objects on surfaces, and `/api/guide` can guide to any item on demand.
 - **`thumb`** is a URL path served by the backend: `/api/thumbs/<id>.jpg` (96 px max crop around the box). It is `""` if the frame could not be decoded.
 - **`/api/guide` modes:**
   - **visual:** target item is in the current frame. Existing pan/clock/beep guidance; `mode:"visual"`. `destination` is filled from the newest sighting when assigned. `current_place` and `next_instruction` are null (localization is skipped to save a provider call).
-  - **navigate:** item not visible, destination known, current place localized, and a directed path exists (or the user is already at the destination). `found:false`, geometry null, `beep_ms` 0. `say` / `next_instruction` use the next taught connection instruction; speak only when the hop changes. At the destination without a visible item: `say` like `"You're at counter beside the sink. Look around slowly."` with `next_instruction` null.
-  - **lost:** cannot offer visual or navigate cues. Includes: no destination on the newest sighting (legacy `"Lost it. Turn slowly left|right."` after 2 s), destination known but localization failed, or no directed path. Honest fallbacks such as `"Last seen at …, but I can't tell where you are yet."`
-- **`/api/guide` when not found (visual-lost, no destination):** `found:false`, `point/box/angle/clock/distance` are `null`, `pan` 0, `beep_ms` 0 (silence). `say` is `""` until the item has been missing for 2 s, then `"Lost it. Turn slowly left."` or `"Lost it. Turn slowly right."` once. **Which way:** the shorter turn back to where the item was last seen. The server remembers that sighting's angle and the phone's heading then (`yaw_deg`); when lost it corrects the angle for how far the phone has turned since (heading difference wrapped across 0/360), so a user who turned right past the item is told "left". With no heading it uses the side the item was last seen on; if it was never seen it says "left".
+  - **navigate:** item not visible, destination known, current place localized, and a directed path exists (or the user is already at the destination). `found:false`, geometry null, `beep_ms` 0. `say` / `next_instruction` use the next taught connection instruction only after facing is aligned; otherwise `say` asks for an in-place scan/turn or a stop and `next_instruction` is null. Speak when the hop or facing status changes. At the destination without a visible item: `say` like `"You're at counter beside the sink. Look around slowly."` with `next_instruction` null.
+  - **lost:** cannot offer visual or navigate cues. An unassigned newest sighting gives `"I last saw your wallet, but couldn't identify its place. Please slowly scan your surroundings."` once per sighting/session, with `destination` and `next_instruction` null. Failed localization asks the user to slowly scan, with the remembered destination retained. A missing directed path reports that no path is known. No walking instruction or beeps are returned for these cases; a later resolved route speaks its next cue again.
+- **`/api/guide` when not found (visual-lost, no destination / no saved sightings):** `found:false`, `point/box/angle/clock/distance` are `null`, `pan` 0, `beep_ms` 0 (silence). `say` is `""` until the item has been missing for 2 s, then `"Lost it. Turn slowly left."` or `"Lost it. Turn slowly right."` once. **Which way:** the shorter turn back to where the item was last seen. The server remembers that sighting's angle and the phone's heading then (`yaw_deg`); when lost it corrects the angle for how far the phone has turned since (heading difference wrapped across 0/360), so a user who turned right past the item is told "left". With no heading it uses the side the item was last seen on; if it was never seen it says "left".
 - **`/api/guide` `say`** is `""` when the direction or navigate hop has not changed since the last cue (server tracks this per item; a pause longer than 10 s starts a fresh session). The returned `angle` is smoothed against the previous angle if it was seen within 3 s.
 - **`yaw_deg`** is accepted but not used server-side; yaw compensation happens in the browser (`web/src/phone/orientation.js`). Compensation wraps the yaw difference across 0/360.
 - **`clock_hour`** rounds halves up (`floor(x + 0.5)`) instead of Python's banker's `round()`, so 15 deg -> 1 and -15 deg -> 12.
@@ -213,3 +232,105 @@ The notes below specify additional behavior; update both when behavior changes.
 - The phrase is "Hey Jarvis" (openWakeWord's pretrained stand-in; "Hey Sightline" would need a custom model). `WAKE_THRESHOLD` (default 0.6) sets the score needed. After a wake the server ignores further wakes for 3 s and resets its detector. At most 2 connections at once.
 - **Privacy:** audio is scored in memory frame by frame and discarded. It is never stored, forwarded to any other service, or logged; only the wake event comes back. (It does travel from the phone to your backend, through the tunnel if you use one.)
 - The phone starts the same listening flow as the talk button: it captures the request that follows on the same stream, stops when you stop talking, and sends it as a WAV to `/api/transcribe`, then `/api/chat`.
+
+## Live apartment calibration
+
+- `GET /api/calibration`: session/map status.
+- `POST /api/calibration/start` (no body): start or resume without a starting place or room label.
+- `POST /api/calibration/frame`: multipart `frame`, `session_id`, `sequence` (integer >= 1),
+  `captured_at` (ISO); survey the place, then independently remember objects.
+- `POST /api/calibration/finish`: JSON `{session_id}`; save even an incomplete map.
+
+Responses share `{session_id:string|null, status:"idle"|"mapping"|"saved", available:bool,
+mock:bool, frames_processed:int, last_sequence:int, current_place:place|null, places:[place...],
+connections_total:int, rooms:[string...], missing_paths:[{from_place_id,to_place_id}...],
+coverage_ready:bool, action:string|null, connection_added:bool, sightings:[sighting...],
+memory_warning:string|null, say:string}`.
+
+Start/continue retains the map, clears camera continuity, and recognizes the next view anew.
+Session metadata persists in SQLite settings; the camera position and previous image do not.
+One apartment, one camera, and one backend worker are supported. The phone has start/finish/
+continue buttons and handles those phrases after transcription (before `/api/chat`). Mapping runs automatically while the native app is connected and not guiding; object queries
+do not require manual finish. The browser has no controls yet.
+
+Each frame uses the full Perceptron survey and then open-vocabulary observation, without a room
+hint. Object destinations require independent evidence; camera position is never assigned to
+all objects. `mock` and `perceptron` support calibration; detect-only `live` is refused with 503.
+The object schema permits names beyond the watchlist and examples. The full observation prompt
+returns empty results only when no relevant everyday objects are visible, not merely when no
+watched objects are visible. Fast `live` memory and `auto_place=false` remain watchlist-limited.
+
+The survey sends a recent previous image before the current image and now requires structured
+`transition_observed`, `departure_view`, and `arrival_view`. A directed connection needs these,
+a nonblank instruction, and uninterrupted camera continuity. No generic or reversed instruction
+is fabricated. This also applies to recorded-video mapping. Matching needs two distinct,
+unambiguous landmarks. Unknown views, sequence gaps, capture gaps over 10 seconds, resume/restart,
+and survey errors break continuity; no connection is added across the gap. Prior map entries
+remain without automatic revalidation. New survey places are refused at the 40-candidate limit.
+
+Busy requests are rejected rather than queued (409). Unknown sessions return 404; finished
+sessions, repeated/decreasing sequences or capture times return 409. Images follow standard
+422/413 validation. Capture times older than 30 seconds or over 5 seconds in the future return
+422. Sequences are reserved before inference, so failed attempts consume their number. Failed
+surveys return 503. A successful survey followed by failed object inference returns 200 with
+`memory_warning` and no new sightings; map progress is retained. The phone retries using a new
+frame/sequence. Repeated progress cues stay quiet; errors and recovery are announced.
+
+`coverage_ready` means at least two stored places have directed paths between every pair.
+It does not establish apartment completeness, correct physical routes, facing, or obstacle
+clearance. `missing_paths` lists unreachable ordered pairs, including return paths. Finish
+reports incomplete coverage without deleting progress. `rooms` lists inferred labels excluding
+`unknown room`, not physical room IDs.
+
+A `calibration` WebSocket event carries frame results; saved objects also use existing sighting
+events. No full images are persisted: one previous view is held in server RAM between requests,
+replaced by new accepted frames and cleared on finish/resume/error. Phone upload timeouts are
+40 seconds for calibration/guidance, 20 seconds for observation. Default calibration pacing is
+at most one frame every two seconds, one request in flight.
+See [CALIBRATION.md](CALIBRATION.md) for setup and limits.
+
+## Departure facing check (latest checkpoint)
+
+When an object is hidden and its destination is assigned, the backend attaches each candidate
+place's next directed route departure to the existing localization request. Structured output
+requires `departure_status: aligned|left|right|blocked|unknown` whenever departures are supplied.
+The result must still identify a known place using at least two distinct landmark descriptions;
+shared evidence that also fits another candidate is rejected. Missing/invalid structured
+facing replies fail with 503, not presumed alignment. Plain localization CLI calls without
+departures retain their previous schema. Real vision ignores mock facing hints.
+
+`/api/guide` adds nullable `departure_status` (null for visual/lost/arrival). Navigate replies
+only contain a walking `next_instruction` when it is `aligned`. Left/right cues request turning
+in place; unknown asks for an in-place scan; blocked asks the user to stop. All these replies
+have `found:false`, zero beeps, and null geometry. Each frame reassesses facing; the previous
+alignment is not carried forward. Recovery repeats the saved instruction. This compares camera
+facing to stored text, not body heading, physical clearance, or metric positioning.
+
+`X-Mock-Facing` or `mock_facing` forces the mock assessment; omitted/invalid values mean unknown.
+The native app announces camera/upload failures once, clears old visual beep state, and resumes
+from fresh results. It does not speak responses from a cancelled guidance loop. The guide retains
+its existing 40-second timeout; the check adds no provider call. Actual latency needs measurement.
+See [NAVIGATION_TRIAL.md](NAVIGATION_TRIAL.md) for verification.
+
+## Automatic background learning and unseen-object requests
+
+The native app starts/resumes calibration on connection whenever the mode supports it, even
+with an existing saved map. Normal place-recognition speech is suppressed; warnings and recovery
+remain spoken. Manual controls are in the debug panel (hidden initially). Backend calibration
+endpoints and persistence are unchanged. Learning means the foreground camera flow, not an OS
+background-camera service when the app is closed or locked.
+
+Commands briefly pause capture and wait for the current frame before querying memory. Recall
+requests leave learning active. A real `find` response saves/finishes the current mapping session
+before starting guidance. Stopping guidance resumes learning with fresh continuity. An explicit
+manual finish remains an override until learning is restarted or the app reconnects.
+
+For `find_item` with no saved sighting, `/api/chat` returns `intent:"where"` with the item and
+“I don't know where your ITEM is yet. I haven't seen it.” It does not return `find` or launch
+a camera search. This applies to watchlist objects, aliases, and open-vocabulary names, including
+model tool calls and keyword fallback. `/api/where` uses the same message for never-seen items.
+When a sighting exists, find can start; route/location/facing checks still determine whether
+a walking instruction is possible. A saved sighting is not a claim the item is still there.
+Native recall responses also end any previous guidance, so an unknown answer cannot leave the
+user following directions to an earlier target. Low-level `/api/guide` remains available for
+explicit camera detection tests; the conversational entry point enforces the unseen-item rule.

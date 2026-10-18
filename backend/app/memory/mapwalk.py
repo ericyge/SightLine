@@ -59,12 +59,14 @@ def apply_survey(survey, *, previous_place_id: str | None = None,
     if survey.decision == "match":
         candidate = current.get(survey.place_id)
         idxs = sorted(set(survey.matched_landmarks or []))
-        if candidate is None or len(idxs) < 2 or any(i >= len(candidate["landmarks"]) for i in idxs):
+        if candidate is None or len(idxs) < 2 or any(i < 0 or i >= len(candidate["landmarks"]) for i in idxs):
             return SurveyApplyResult(None, "unknown", False,
                                      "Match lacked two valid landmarks of a known place.")
         matched = {_normalized(candidate["landmarks"][i]) for i in idxs}
         if len(matched) < 2:
             return SurveyApplyResult(None, "unknown", False, "Matched landmarks were not distinct.")
+        if any(matched <= _landmarks(p["landmarks"]) for p in current.values() if p["id"] != candidate["id"]):
+            return SurveyApplyResult(None, "unknown", False, "Matched landmarks do not uniquely identify this place.")
         place_id, action = candidate["id"], "match"
         reason = f"Matched taught place. {survey.reason}"
     elif survey.decision == "new":
@@ -89,22 +91,20 @@ def apply_survey(survey, *, previous_place_id: str | None = None,
         return SurveyApplyResult(None, "unknown", False, "Unrecognized survey decision.")
 
     connection_added = False
-    if place_id and previous_place_id and previous_place_id != place_id:
+    if (place_id and previous_place_id and previous_place_id != place_id
+            and survey.transition_observed and survey.instruction_from_previous
+            and survey.departure_view and survey.arrival_view):
         saved = memory.get_map()
         if previous_place_id in {p["id"] for p in saved["places"]}:
             exists = any(e["from_place_id"] == previous_place_id and e["to_place_id"] == place_id
                          for e in saved["connections"])
             if not exists:
-                prev = next(p for p in saved["places"] if p["id"] == previous_place_id)
-                dest = next(p for p in saved["places"] if p["id"] == place_id)
                 instruction = (survey.instruction_from_previous or "").strip()
-                if not instruction:
-                    instruction = f"Walk toward {dest['name']}."
                 memory.teach_map(MemoryMapUpdate(connections=[PlaceConnection(
                     from_place_id=previous_place_id, to_place_id=place_id,
-                    departure_view=f"At {prev['name']}.",
+                    departure_view=survey.departure_view[:1000],
                     instruction=instruction[:1000],
-                    arrival_view=f"At {dest['name']}.")]))
+                    arrival_view=survey.arrival_view[:1000])]))
                 connection_added = True
     return SurveyApplyResult(place_id, action, connection_added, reason)
 
@@ -116,7 +116,11 @@ def mapwalk_video(vision, frames, *, room: str | None = None, hints_for=None):
     hints_for: optional callable(offset, index) -> hints dict for MockVision
     """
     previous = None
+    previous_frame = None
+    previous_offset = None
     for index, (offset, jpeg) in enumerate(frames):
+        if previous_offset is not None and not 0 < offset - previous_offset <= 10:
+            previous = previous_frame = None
         candidates = candidate_places(room)
         hints = hints_for(offset, index) if hints_for else None
         previous_info = None
@@ -126,10 +130,12 @@ def mapwalk_video(vision, frames, *, room: str | None = None, hints_for=None):
             except memory.MemoryNotFound:
                 previous_info = None
         begin_places = len(memory.get_map()["places"])
-        survey = vision.survey_place(jpeg, candidates, previous=previous_info, hints=hints)
+        survey = vision.survey_place(jpeg, candidates, previous=previous_info, hints=hints,
+                                     previous_frame=previous_frame)
         applied = apply_survey(survey, previous_place_id=previous, room_hint=room)
-        if applied.place_id:
-            previous = applied.place_id
+        previous = applied.place_id
+        previous_frame = jpeg if previous else None
+        previous_offset = offset
         yield {
             "offset_seconds": round(float(offset), 6),
             "place_id": applied.place_id,

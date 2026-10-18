@@ -74,6 +74,39 @@ def test_empty_watchlist_makes_no_call(provider, jpeg):
     assert not requests
 
 
+SURVEY = {"decision": "new", "place_id": None, "name": "counter", "room": "kitchen",
+          "description": "Counter beside the sink.", "landmarks": ["sink", "built-in cabinets"],
+          "matched_landmarks": [], "instruction_from_previous": "Follow the doorway to the sink.",
+          "transition_observed": True, "departure_view": "Facing the sink through the doorway.",
+          "arrival_view": "Facing the sink beside the counter.", "reason": "Visible connected doorway."}
+
+
+def test_survey_sends_previous_then_current_image_with_structured_transition(provider, jpeg):
+    vision, requests = provider(SURVEY)
+    previous = {"id": "doorway", "name": "doorway", "room": "kitchen"}
+    result = vision.survey_place(jpeg, [], previous=previous, previous_frame=jpeg)
+    assert result.transition_observed and result.departure_view == SURVEY['departure_view']
+    body = requests[0]
+    images = [part for part in body['messages'][-1]['content'] if part.get('type') == 'image_url']
+    assert len(images) == 2
+    assert body['messages'][-1]['content'][-1] == images[-1]
+    schema = body['response_format']['json_schema']['schema']
+    assert 'transition_observed' in schema['required']
+
+
+def test_survey_cannot_claim_transition_without_previous_image(provider, jpeg):
+    vision, _ = provider(SURVEY)
+    result = vision.survey_place(jpeg, [], previous={'id': 'doorway', 'name': 'doorway', 'room': 'kitchen'})
+    assert result.decision == 'new' and not result.transition_observed
+    assert result.instruction_from_previous is None
+
+
+def test_invalid_survey_response_fails_without_saving(provider, jpeg):
+    vision, _ = provider({**SURVEY, 'transition_observed': 'yes'})
+    with pytest.raises(VisionUnavailable, match='invalid place survey'):
+        vision.survey_place(jpeg, [])
+
+
 @pytest.mark.parametrize("box", [
     [-1, 0, 500, 500], [0, 0, 1001, 500], [500, 0, 400, 500],
     [0, 500, 500, 500], [0, 0, 500], [False, 0, 500, 500],
@@ -292,3 +325,72 @@ def test_open_vocabulary_observation_and_on_demand_guidance(client, provider, jp
     guide = client.post("/api/guide", files={"frame": ("frame.jpg", jpeg)}, data={"item": "my bottle"}).json()
     assert guide["found"] is True and "Water bottle" in guide["say"]
     assert guide_reqs[0]["response_format"]["json_schema"]["schema"]["$defs"]["_Label"]["properties"]["item"]["enum"] == ["water bottle"]
+
+
+def test_calibration_open_vocabulary_without_any_watchlist_object(client, provider, jpeg, monkeypatch):
+    from datetime import datetime, timezone
+    from app import main
+    from app.vision import MockVision
+    # Survey is scripted; the real SDK/observation adapter handles an offline provider response.
+    vision, requests = provider({"detections": [
+        {"item": "a coffee mug", "box": [100, 500, 220, 650], "spot": "on the counter", "location": AUTO_LOCATION},
+        {"item": "stapler", "box": [300, 520, 350, 580], "spot": "on the counter", "location": AUTO_LOCATION},
+    ]})
+    monkeypatch.setattr(vision, 'survey_place', MockVision().survey_place)
+    monkeypatch.setattr(main, 'get_vision', lambda: vision)
+    session = client.post('/api/calibration/start').json()['session_id']
+    response = client.post('/api/calibration/frame', files={'frame': ('frame.jpg', jpeg, 'image/jpeg')},
+        data={'session_id': session, 'sequence': 1, 'captured_at': datetime.now(timezone.utc).isoformat()})
+    assert response.status_code == 200
+    assert [s['item'] for s in response.json()['sightings']] == ['cup', 'stapler']
+    request = requests[0]
+    schema = request['response_format']['json_schema']['schema']
+    assert 'enum' not in schema['$defs']['_LocatedLabel']['properties']['item']
+    assert 'no watched objects are visible' not in request['messages'][0]['content']
+    assert 'not an exhaustive list' in request['messages'][0]['content']
+    for query, expected in [('my mug', 'cup'), ('my stapler', 'stapler')]:
+        answer = client.get('/api/where', params={'item': query}).json()
+        assert answer['found'] and answer['item'] == expected and answer['destination']
+    print('\nOpen-vocabulary calibration: cup and stapler saved and recalled; neither is on the watchlist.')
+
+
+@pytest.mark.parametrize('status', ['aligned', 'left', 'right', 'blocked', 'unknown'])
+def test_departure_in_localization_request(provider, jpeg, status):
+    place = {'id': 'door', 'name': 'doorway', 'room': 'bedroom', 'description': 'Bedroom exit.',
+             'landmarks': ['doorframe', 'built-in shelf'],
+             'departure': {'to_place_id': 'hall', 'departure_view': 'Facing the hallway with shelf on right.'}}
+    vision, requests = provider({'place_id': 'door', 'matched_landmarks': [0, 1],
+                                 'reason': 'Doorframe and shelf visible.', 'departure_status': status})
+    result = vision.localize(jpeg, [place], {'facing': 'aligned'})
+    assert result.departure_status == status  # Real provider ignores mock hint.
+    assert result.place_id == 'door'
+    assert len(requests) == 1
+    body = requests[0]
+    assert 'departure_status' in body['response_format']['json_schema']['schema']['required']
+    assert 'Facing the hallway with shelf on right.' in json.dumps(body)
+    assert 'knowing a room does NOT establish facing' in body['messages'][0]['content']
+
+
+@pytest.mark.parametrize('updates', [{'departure_status': 'forward'}, {'matched_landmarks': [0]},
+                                    {'place_id': 'invented'}, {'matched_landmarks': [0, 0]}])
+def test_departure_rejects_invalid_or_weak_evidence(provider, jpeg, updates):
+    place = {'id': 'door', 'name': 'door', 'room': 'bedroom', 'description': 'Exit.',
+             'landmarks': ['frame', 'shelf'], 'departure': {'departure_view': 'Facing hallway.'}}
+    body = {'place_id': 'door', 'matched_landmarks': [0, 1], 'reason': 'Visible.',
+            'departure_status': 'aligned', **updates}
+    vision, _ = provider(body)
+    if updates.get('departure_status') == 'forward':
+        with pytest.raises(VisionUnavailable):
+            vision.localize(jpeg, [place])
+    else:
+        result = vision.localize(jpeg, [place])
+        assert result.place_id is None and result.departure_status == 'unknown'
+
+
+def test_departure_field_required_and_plain_localization_compatible(provider, jpeg):
+    place = {'id': 'door', 'name': 'door', 'room': 'bedroom', 'description': 'Exit.',
+             'landmarks': ['frame', 'shelf']}
+    vision, _ = provider({'place_id': 'door', 'matched_landmarks': [0, 1], 'reason': 'Visible.'})
+    assert vision.localize(jpeg, [place]).place_id == 'door'
+    with pytest.raises(VisionUnavailable):
+        vision.localize(jpeg, [{**place, 'departure': {'departure_view': 'Facing hallway.'}}])

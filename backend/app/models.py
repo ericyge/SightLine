@@ -88,6 +88,7 @@ class GuideResponse(BaseModel):
     current_place: str | None = None
     destination: Place | None = None
     next_instruction: str | None = None
+    departure_status: Literal["aligned", "left", "right", "blocked", "unknown"] | None = None
 
 
 class WatchItem(BaseModel):
