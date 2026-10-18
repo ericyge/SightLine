@@ -143,3 +143,9 @@ test("only the phone speaks: the dashboard does not use any audio or voice code"
     assert.ok(!src.includes(banned), `Dashboard.jsx must not contain ${banned}`);
   }
 });
+
+test('cue treats the new "always" setting like "cached" on the web page (cached-only lookups)', async () => {
+  const { voice, log } = setup({ ttsGuidance: "always" });
+  await voice.cue("Reach out now");
+  assert.deepEqual(log.fetches, [{ text: "Reach out now", cachedOnly: true, timeoutMs: CUE_TIMEOUT_MS }]);
+});

@@ -68,6 +68,22 @@ def yaw_compensate(last_angle: float, current_yaw: float, yaw_at_last: float) ->
     return last_angle - _wrap180(current_yaw - yaw_at_last)
 
 
+def turn_direction(last_angle: float | None, yaw_at_last: float | None, yaw_now: float | None) -> str:
+    """Which way is the SHORTER turn back to where the item was last seen: "right" or "left".
+
+    last_angle is where it was (degrees, + = right of the camera's centre). If the phone's heading is known
+    both then and now, it is corrected for how far the phone has turned since (yaw_compensate, which wraps
+    across 0/360), so a user who turned right past the item is told to come back left. Without a last
+    sighting there is nothing to go on, so it stays "left" (the original cue).
+    """
+    if last_angle is None:
+        return "left"
+    angle = last_angle
+    if yaw_at_last is not None and yaw_now is not None:
+        angle = yaw_compensate(last_angle, yaw_now, yaw_at_last)
+    return "right" if _wrap180(angle) > 0 else "left"
+
+
 def _direction(angle: float) -> str:
     """left_right bucket for an angle."""
     if abs(angle) <= CENTER_DEG:
@@ -78,18 +94,19 @@ def _direction(angle: float) -> str:
 
 def say(item: str, angle: float | None, clock: int | None, distance: str | None,
         style: str, *, found: bool = True, lost_s: float = 0.0,
-        last_key: str | None = None) -> tuple[str, str | None]:
+        last_key: str | None = None, turn: str = "left") -> tuple[str, str | None]:
     """Next spoken cue as (text, key). Text is "" when nothing new should be spoken.
 
     key identifies what was last said; pass it back as last_key so a cue is only spoken
-    when it changes. Cues stay under 8 words. beeps_only never speaks.
+    when it changes. Cues stay under 8 words. beeps_only never speaks. When the item is lost, `turn`
+    ("left" or "right", see turn_direction) is the way to turn.
     """
     if style == "beeps_only":
         return "", last_key
     if not found:
         if lost_s < LOST_AFTER_S or last_key == "lost":
             return "", last_key
-        return "Lost it. Turn slowly left.", "lost"
+        return f"Lost it. Turn slowly {turn}.", "lost"
     if distance == "reach":
         return ("" if last_key == "reach" else "Reach out now"), "reach"
     name = item.capitalize()
@@ -107,6 +124,7 @@ class GuideState:
     """Per-item tracking between /guide calls. Owned by the caller; times are monotonic seconds."""
     since: float                 # last time the item was seen (or search start)
     last_angle: float | None = None
+    yaw_at_last: float | None = None    # the phone's heading when the item was last seen (degrees, may be None)
     last_key: str | None = None
     touched: float = 0.0
 
@@ -127,19 +145,23 @@ def navigate_say(text: str, key: str, last_key: str | None) -> tuple[str, str]:
 
 
 def compute_guide(item: str, box: list[float] | None, state: GuideState, style: str,
-                  fov_h: float, now: float) -> dict:
-    """One guidance step from a detection (box or None) to a GuideResponse-shaped dict."""
+                  fov_h: float, now: float, yaw: float | None = None) -> dict:
+    """One guidance step from a detection (box or None) to a GuideResponse-shaped dict.
+
+    yaw is the phone's current heading in degrees (optional). It lets the "lost" cue point the shorter way.
+    """
     state.touched = now
     if box is None:
+        turn = turn_direction(state.last_angle, state.yaw_at_last, yaw)
         text, state.last_key = say(item, None, None, None, style, found=False,
-                                   lost_s=now - state.since, last_key=state.last_key)
+                                   lost_s=now - state.since, last_key=state.last_key, turn=turn)
         return {"found": False, "point": None, "box": None, "angle": None, "clock": None,
                 "distance": None, "pan": 0.0, "say": text, "beep_ms": 0}
     cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
     angle = angle_deg(cx, fov_h)
     if state.last_angle is not None and now - state.since <= SMOOTH_WINDOW_S:
         angle = smooth(state.last_angle, angle)
-    state.last_angle, state.since = angle, now
+    state.last_angle, state.since, state.yaw_at_last = angle, now, yaw
     clock, dist = clock_hour(angle), distance_bucket(box, cy)
     text, state.last_key = say(item, angle, clock, dist, style, last_key=state.last_key)
     return {"found": True, "point": [round(cx, 3), round(cy, 3)], "box": box,

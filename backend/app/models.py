@@ -114,7 +114,8 @@ class HealthResponse(BaseModel):
     vision: dict | None = None   # live Perceptron latency {calls, p50_ms, p95_ms, errors, dropped}; None in mock
     guide_max_fps: float = 3.0   # clients send at most this many /api/guide frames per second
     tts: str = "browser"         # "elevenlabs": speak chat replies via /api/speak; "browser": built-in voice
-    tts_guidance: str = "cached" # "cached": fixed guidance cues use ElevenLabs audio only when cached; "never"
+    tts_guidance: str = "always" # guidance cues: "always" ElevenLabs voice, "cached" only if already cached, "never"
+    wake: bool = False           # true when WS /ws/wake can run (WAKE_ENABLED, packages and models present)
 
 
 class SpeakRequest(BaseModel):

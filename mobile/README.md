@@ -89,7 +89,7 @@ Further reading before the demo: `src/Controls.tsx` is the whole screen logic, m
 
 ## Voice (text-to-speech)
 
-Chat replies are spoken with the backend's ElevenLabs voice when `TTS_PROVIDER=elevenlabs` (root `.env`; see the root README). Fast guidance cues use the built-in voice, except fixed cues the server already has cached. If `/api/speak` fails or is slow, the app speaks with the built-in voice. Unverified: playback on real phones (`src/voice.ts` cannot detect a silent playback failure; TODO(C)).
+Everything the app says (replies, guidance cues, error messages) goes through one place, `src/voiceCore.ts`, and is spoken in the backend's ElevenLabs voice when `TTS_PROVIDER=elevenlabs` (root `.env`; see the root README). Only one voice speaks at a time: starting any speech silences both the ElevenLabs player and the iPhone voice first, a guidance cue waits for a reply to finish instead of cutting it off (only the newest waiting cue is spoken), and a new request from you interrupts. The iPhone voice is used only when ElevenLabs fails or takes too long (2.5 s for replies, 1.5 s for cues), or when `TTS_GUIDANCE` is `cached`/`never`. Unverified on real phones: that playback finishes are reported correctly (`src/voice.ts` ends a wait after 30 s regardless) and that a silent playback failure falls back (TODO(C)).
 
 ## Debug counters (what to look at when frames do not arrive)
 
@@ -104,3 +104,11 @@ The green box at the top of the screen counts every frame: `Memory: N sent · ok
 **`CameraNotReadyException` on iPhone** means the previous photo has not finished: expo-camera refuses a new one until it does. The app takes photos one at a time (a second request fails at once with "previous photo still in progress"), gives each photo 15 seconds ("photo timed out"), and restarts the camera view by itself only when photos keep failing for real or one has been stuck for 20+ seconds (a merely slow photo is left to finish; the restart count shows as "restarted Nx" in the Camera line). On iOS the camera is set to 640x480 photos: the default is full resolution, which is huge and slow on recent iPhones. If that count keeps climbing, photos are hanging on that phone; tell whoever is debugging what the last memory frame says.
 
 **`FAILED at upload: Unsupported FormDataPart Implementation`** means a file was attached the old React Native way (`{uri, name, type}`), which Expo SDK 57's `fetch` rejects. Files are now attached through `src/filePart.ts` (an object with `bytes()`), used by `src/api.ts`. `npm run check:upload` proves it without a phone: it runs Expo's own multipart encoder, shows the old shape failing with that exact error, and shows the new shape producing the right filename, content type and bytes.
+
+## "Hey Jarvis" (wake word)
+
+With the backend set up for it (root README: "Hey Jarvis" wake word), the debug box shows `Wake word: listening for "Hey Jarvis"` and a **Hey Jarvis: ON/OFF** switch appears. Say "Hey Jarvis", feel the buzz, then say your request ("find my keys"); it stops listening when you stop talking and handles the request like the talk button. Files: `src/useWake.ts` (microphone stream + WebSocket), `src/wakeCore.ts` (tested logic: audio conversion, end-of-speech, WAV, URLs).
+
+How it behaves on iPhone, from expo-audio's native code: starting the microphone stream switches the phone to **record-only**, so nothing can play while it runs. The app therefore turns the wake word off while guiding (beeps), while a reply is being spoken, and while you hold the talk button, then restores playback and turns it back on. That also means "Hey Jarvis, stop" does not work during guidance; use the Stop button.
+
+Unverified on a real phone: the microphone stream itself (Expo Go), the level thresholds for detecting the end of your request (`DEFAULT_ENDPOINT` in `wakeCore.ts`; the debug box shows the live mic level to tune them), the WebSocket through a Cloudflare/ngrok tunnel, how well a real voice triggers the model, and Android.

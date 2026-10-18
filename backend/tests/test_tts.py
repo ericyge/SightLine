@@ -181,8 +181,9 @@ def test_enabled_only_with_provider_key_and_voice(monkeypatch):
 
 
 def test_guidance_cues_setting(monkeypatch):
-    assert tts.guidance_cues_mode() == "cached"
-    for value, expected in (("never", "never"), ("NEVER", "never"), ("cached", "cached"), ("junk", "cached")):
+    assert tts.guidance_cues_mode() == "always"        # one voice by default
+    for value, expected in (("never", "never"), ("NEVER", "never"), ("cached", "cached"), ("Always", "always"),
+                            ("junk", "always"), ("", "always")):
         monkeypatch.setenv("TTS_GUIDANCE", value)
         assert tts.guidance_cues_mode() == expected
 
@@ -195,9 +196,11 @@ def speak(client, text="Looking for your wallet.", **params):
 
 def test_health_reports_tts(client, eleven_env, monkeypatch):
     h = client.get("/api/health").json()
-    assert h["tts"] == "elevenlabs" and h["tts_guidance"] == "cached"
+    assert h["tts"] == "elevenlabs" and h["tts_guidance"] == "always"
     monkeypatch.setenv("TTS_GUIDANCE", "never")
     assert client.get("/api/health").json()["tts_guidance"] == "never"
+    monkeypatch.setenv("TTS_GUIDANCE", "cached")
+    assert client.get("/api/health").json()["tts_guidance"] == "cached"
     monkeypatch.setenv("TTS_PROVIDER", "browser")
     assert client.get("/api/health").json()["tts"] == "browser"
 

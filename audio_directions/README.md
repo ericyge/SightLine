@@ -117,6 +117,21 @@ audio_directions/.venv/bin/python -m audio_directions demo --debug --barge-in
 audio_directions/.venv/bin/python -B -m unittest discover -s audio_directions/tests -v
 ```
 
+**Windows / Python 3.13:** the requirements file now picks NumPy 2.x on Python 3.13 (NumPy 1.x has no
+prebuilt wheel there, so pip tried to compile it and failed without a C compiler). On Windows use:
+
+```powershell
+py -3 -m venv audio_directions\.venv
+audio_directions\.venv\Scripts\python.exe -m pip install --no-cache-dir -r audio_directionsequirements.txt
+audio_directions\.venv\Scripts\python.exe -m audio_directions.setup_wake
+```
+
+Checked on Python 3.13 / Windows: the packages import, the 31 offline tests pass, `setup_wake` downloads and
+loads the model, and the detector scores a synthesized "Hey Jarvis" at 0.998 (threshold 0.6) while "Where is my
+wallet" and "Hello there, good morning" score 0.000. A real microphone and a real person are still untested.
+**This is a laptop program: the phone apps (`web/`, `mobile/`) do not use it, so saying "Hey Jarvis" to the
+phone does nothing.**
+
 `setup_wake` downloads just `melspectrogram.onnx`, `embedding_model.onnx`, and
 `hey_jarvis_v0.1.onnx` from the upstream v0.5.1 model release into git-ignored
 `audio_directions/models/pretrained/`. It then loads the model and scores 40

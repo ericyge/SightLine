@@ -105,7 +105,7 @@ See [MEMORY.md](MEMORY.md) for a complete mock test and assignment of earlier re
 - pitch_boost(angle) = true when abs(angle) <= 8 degrees
 - smooth(prev_angle, new_angle) = 0.5*new + 0.5*prev (moving average, newest weight 0.5)
 - yaw compensation: between vision updates, corrected_angle = last_angle - (current_yaw - yaw_at_last_vision_update)
-- say(item, angle, clock, distance, style): short cues (< 8 words), speak a direction only when it changes; "reach out now" when distance == "reach"; if not found for 2 s: "Lost it. Turn slowly left."; style clock_face uses "Wallet at 2 o'clock", left_right uses "slightly left / turn right / straight ahead", beeps_only returns an empty say.
+- say(item, angle, clock, distance, style): short cues (< 8 words), speak a direction only when it changes; "reach out now" when distance == "reach"; if not found for 2 s: "Lost it. Turn slowly left." or "...right." (the shorter way back to where it was last seen, see below); style clock_face uses "Wallet at 2 o'clock", left_right uses "slightly left / turn right / straight ahead", beeps_only returns an empty say.
 
 ---
 
@@ -127,8 +127,8 @@ The notes below specify additional behavior; update both when behavior changes.
 - **`/api/guide` modes:**
   - **visual:** target item is in the current frame. Existing pan/clock/beep guidance; `mode:"visual"`. `destination` is filled from the newest sighting when assigned. `current_place` and `next_instruction` are null (localization is skipped to save a provider call).
   - **navigate:** item not visible, destination known, current place localized, and a directed path exists (or the user is already at the destination). `found:false`, geometry null, `beep_ms` 0. `say` / `next_instruction` use the next taught connection instruction; speak only when the hop changes. At the destination without a visible item: `say` like `"You're at counter beside the sink. Look around slowly."` with `next_instruction` null.
-  - **lost:** cannot offer visual or navigate cues. Includes: no destination on the newest sighting (legacy `"Lost it. Turn slowly left."` after 2 s), destination known but localization failed, or no directed path. Honest fallbacks such as `"Last seen at …, but I can't tell where you are yet."`
-- **`/api/guide` when not found (visual-lost, no destination):** `found:false`, `point/box/angle/clock/distance` are `null`, `pan` 0, `beep_ms` 0 (silence). `say` is `""` until the item has been missing for 2 s, then `"Lost it. Turn slowly left."` once.
+  - **lost:** cannot offer visual or navigate cues. Includes: no destination on the newest sighting (legacy `"Lost it. Turn slowly left|right."` after 2 s), destination known but localization failed, or no directed path. Honest fallbacks such as `"Last seen at …, but I can't tell where you are yet."`
+- **`/api/guide` when not found (visual-lost, no destination):** `found:false`, `point/box/angle/clock/distance` are `null`, `pan` 0, `beep_ms` 0 (silence). `say` is `""` until the item has been missing for 2 s, then `"Lost it. Turn slowly left."` or `"Lost it. Turn slowly right."` once. **Which way:** the shorter turn back to where the item was last seen. The server remembers that sighting's angle and the phone's heading then (`yaw_deg`); when lost it corrects the angle for how far the phone has turned since (heading difference wrapped across 0/360), so a user who turned right past the item is told "left". With no heading it uses the side the item was last seen on; if it was never seen it says "left".
 - **`/api/guide` `say`** is `""` when the direction or navigate hop has not changed since the last cue (server tracks this per item; a pause longer than 10 s starts a fresh session). The returned `angle` is smoothed against the previous angle if it was seen within 3 s.
 - **`yaw_deg`** is accepted but not used server-side; yaw compensation happens in the browser (`web/src/phone/orientation.js`). Compensation wraps the yaw difference across 0/360.
 - **`clock_hour`** rounds halves up (`floor(x + 0.5)`) instead of Python's banker's `round()`, so 15 deg -> 1 and -15 deg -> 12.
@@ -197,5 +197,19 @@ The notes below specify additional behavior; update both when behavior changes.
 - `TTS_PROVIDER=browser` (default): `/api/speak` answers 503 and phones use their built-in voice. `elevenlabs` needs `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`; otherwise `health.tts` stays `"browser"`.
 - Relay (per ElevenLabs' docs): `POST {ELEVENLABS_BASE_URL or https://api.elevenlabs.io/v1}/text-to-speech/{voice_id}?output_format=mp3_44100_128`, header `xi-api-key`, JSON body `{text, model_id}`. `model_id` = `ELEVENLABS_TTS_MODEL`, blank = `eleven_flash_v2_5` (unconfirmed on ElevenLabs' docs page; see `.env.example`). Timeout `TTS_TIMEOUT_S` (default 3). No automatic retries.
 - **Cache:** text of 80 characters or less is cached in memory (LRU, 100 entries, keyed by a hash of voice + model + format + normalized text), so repeats are instant and free. The fixed guidance cues are pre-rendered in the background at startup.
-- **Apps:** use `/api/speak` for chat replies (`say` from `/api/chat`). Fast guidance cues use the built-in voice unless `tts_guidance` is `"cached"` AND `cached_only=true` returns audio (a 204 means use the built-in voice). Any error, 5xx or slowness (2.5 s for replies, 0.6 s for cached cues) falls back to the built-in voice, so the user never hears nothing.
+- **Apps:** use `/api/speak` for chat replies (`say` from `/api/chat`). `tts_guidance` (env `TTS_GUIDANCE`) sets guidance cues: `"always"` (default) fetches every cue from `/api/speak` (1.5 s limit) so there is one voice; `"cached"` uses `cached_only=true` and a 204 means use the built-in voice; `"never"` always uses the built-in voice. Any error, 5xx or slowness (2.5 s for replies, 1.5 s for cues, 0.6 s for cached lookups) falls back to the built-in voice, so the user never hears nothing. **One speaker at a time:** starting any speech silences both voices first; a new reply interrupts anything; a guidance cue never interrupts a reply (it waits, and only the newest waiting cue is then spoken). Implemented in the Expo app (`mobile/src/voiceCore.ts`); the web page still uses the older cached-only behavior.
 - **Privacy:** only the reply text goes to ElevenLabs. Never the user's audio, camera frames, thumbnails or history. The key and the spoken text are never logged.
+
+---
+
+# Wake word (added)
+
+  WS  /ws/wake      client -> server: binary frames of 16 kHz mono 16-bit little-endian audio (under 64 KB each)
+                    client -> server: text "reset" (clear the detector; send before resuming after a request)
+                    server -> client: {"type":"ready"} | {"type":"wake","score":0.97} | {"type":"error","reason":"..."}
+  GET /api/health   also returns  wake (true when /ws/wake can run)
+
+- Opt-in: `WAKE_ENABLED=true`, the optional packages in `backend/requirements-wake.txt`, and the models from `python -m audio_directions.setup_wake` (never downloaded at runtime). Otherwise the socket answers `error` with the reason and closes, and `health.wake` is false.
+- The phrase is "Hey Jarvis" (openWakeWord's pretrained stand-in; "Hey Sightline" would need a custom model). `WAKE_THRESHOLD` (default 0.6) sets the score needed. After a wake the server ignores further wakes for 3 s and resets its detector. At most 2 connections at once.
+- **Privacy:** audio is scored in memory frame by frame and discarded. It is never stored, forwarded to any other service, or logged; only the wake event comes back. (It does travel from the phone to your backend, through the tunnel if you use one.)
+- The phone starts the same listening flow as the talk button: it captures the request that follows on the same stream, stops when you stop talking, and sends it as a WAV to `/api/transcribe`, then `/api/chat`.

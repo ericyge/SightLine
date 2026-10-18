@@ -7,7 +7,7 @@ How each guidance style sounds and when to use it. Behavior is implemented in `b
 - A direction is spoken only when it changes. Silence between cues is normal, because the beeps carry the continuous information.
 - Beeps pan left or right toward the item and speed up as it gets closer (800 ms apart when far, 350 near, 150 within reach). Pitch rises when the item is nearly dead ahead.
 - At arm's length: "Reach out now" (once).
-- If the item is out of view for 2 seconds: "Lost it. Turn slowly left."
+- If the item is out of view for 2 seconds: "Lost it. Turn slowly left." or "Lost it. Turn slowly right." (the shorter way back to where it was last seen)
 
 ## `clock_face`
 - Speaks: "Wallet at 2 o'clock", "Wallet at 12 o'clock", "Wallet at 11 o'clock".

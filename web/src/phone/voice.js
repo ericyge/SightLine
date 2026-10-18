@@ -56,7 +56,7 @@ export function createVoice({ fetchAudio, play, stopPlayback, builtin, getConfig
       lastCue = { text, at: now() };
       const mine = ++ticket;
       const cfg = getConfig();
-      if (cfg.tts === "elevenlabs" && cfg.ttsGuidance === "cached"
+      if (cfg.tts === "elevenlabs" && (cfg.ttsGuidance === "cached" || cfg.ttsGuidance === "always")
           && (await viaElevenLabs(text, true, CUE_TIMEOUT_MS, mine))) return;
       if (mine === ticket) {
         stopPlayback();
