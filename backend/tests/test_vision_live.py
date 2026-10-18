@@ -1,4 +1,4 @@
-"""Live Perceptron client with the real SDK parsing mocked HTTP replies. No real network or key."""
+"""Fast live Perceptron client (app/vision/live.py) with the real SDK parsing mocked HTTP replies. No real network or key."""
 import io
 import json
 import logging
@@ -11,7 +11,9 @@ import pytest
 from PIL import Image
 
 from app import main, vision
-from app.vision import PerceptronVision, VisionBusy, VisionStats, box_from_sdk, match_class
+from app.vision import PerceptronVision as FullPerceptronVision
+from app.vision import live as live_module
+from app.vision.live import DetectVision, VisionBusy, VisionStats, box_from_sdk, match_class
 from tests.test_api import frame
 
 KEY = "pk-test-SECRET-321"
@@ -47,7 +49,7 @@ def live(monkeypatch):
 
     monkeypatch.setattr("perceptron.client._http_client",
                         lambda timeout: httpx.Client(transport=httpx.MockTransport(handle), timeout=timeout))
-    env.client = PerceptronVision()
+    env.client = DetectVision()
     return env
 
 
@@ -95,7 +97,7 @@ def test_request_shape_and_privacy(live, caplog):
 
 def test_model_comes_from_env(live, monkeypatch):
     monkeypatch.setenv("PERCEPTRON_MODEL", "some-other-id")
-    client = PerceptronVision()
+    client = DetectVision()
     client.detect(JPEG, ITEMS)
     assert json.loads(live.seen[-1].content)["model"] == "some-other-id"
 
@@ -148,7 +150,7 @@ def test_client_recovers_after_a_failure(live):
 def test_repeated_failures_warn_once_per_minute(live, caplog, monkeypatch):
     live.handler = timeout
     clock = {"t": 1000.0}
-    monkeypatch.setattr(vision.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(live_module.time, "monotonic", lambda: clock["t"])
     with caplog.at_level(logging.WARNING, logger="sightline.vision"):
         for _ in range(5):
             live.client.detect(JPEG, ITEMS)
@@ -308,7 +310,7 @@ def test_live_mode_needs_a_key(monkeypatch):
 def test_modes_select_the_right_client(monkeypatch):
     monkeypatch.setenv("PERCEPTRON_API_KEY", KEY)
     for mode, cls in (("mock", vision.MockVision), ("", vision.MockVision),
-                      ("live", PerceptronVision), ("perceptron", PerceptronVision)):
+                      ("live", DetectVision), ("perceptron", FullPerceptronVision)):
         monkeypatch.setenv("PERCEPTRON_MODE", mode)
         vision.reset_vision()
         assert isinstance(vision.get_vision(), cls)
@@ -393,7 +395,7 @@ def test_sdk_http_client_uses_the_system_certificate_store(monkeypatch):
     monkeypatch.setattr(sdk, "_http_client", _http_client)
     monkeypatch.setattr("httpx.Client", Recorder)
     monkeypatch.setenv("PERCEPTRON_API_KEY", KEY)
-    PerceptronVision()
+    DetectVision()
     sdk._http_client(2.0)
     from app.net import VERIFY
     assert seen == {"timeout": 2.0, "verify": VERIFY}
@@ -402,5 +404,5 @@ def test_sdk_http_client_uses_the_system_certificate_store(monkeypatch):
 def test_a_test_mock_is_not_overwritten(live):
     from perceptron import client as sdk
     mock = sdk._http_client
-    PerceptronVision()
+    DetectVision()
     assert sdk._http_client is mock

@@ -1,4 +1,4 @@
-r"""Call the live Perceptron client on one image and print what comes back.
+r"""Call the fast live Perceptron client (PERCEPTRON_MODE=live) on one image and print what comes back.
 
 Use it to check, with your real key, the coordinate system and the latency:
 
@@ -24,7 +24,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 from app.guidance import angle_deg, clock_hour, distance_bucket  # noqa: E402
-from app.vision import PerceptronVision, box_from_sdk  # noqa: E402
+from app.vision.live import DetectVision, box_from_sdk  # noqa: E402
 
 
 def describe(box, fov_h: float) -> None:
@@ -54,7 +54,7 @@ def main() -> int:
         print("usage error: image file not found, or --repeat < 1")
         return 2
     try:
-        client = PerceptronVision()
+        client = DetectVision()
     except RuntimeError as e:
         print(f"ERROR: {e}")
         return 1

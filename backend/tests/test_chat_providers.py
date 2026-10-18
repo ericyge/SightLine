@@ -25,7 +25,7 @@ def test_gemini_request_has_only_allowed_data(client, monkeypatch, jpeg):
     r = chat(client, "where did I leave it", history=[{"role": "user", "content": "hi"}],
              current_room="kitchen")
     assert r["provider"] == "gemini" and r["intent"] == "where"
-    assert r["say"].startswith("In your bedroom")           # the answer came from stored sightings
+    assert r["say"].startswith("Last seen at")              # the answer came from stored sightings
     body = json.dumps(sent[0])
     assert set(sent[0]) == {"model", "messages", "tools", "temperature"}
     assert [m["role"] for m in sent[0]["messages"]] == ["system", "user", "user"]

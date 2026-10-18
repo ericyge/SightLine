@@ -1,22 +1,100 @@
 # API contract (backend implements, frontend consumes; keep field names EXACTLY)
 
+Read the implementation notes below together with the endpoint list. They define the current
+behavior where the original scaffold sketch is abbreviated. Setup and video-tool commands
+live in [VISION.md](VISION.md).
+
 Stored records:
   item:     { name, aliases[], description }
   room:     { name }
-  sighting: { item, room, spot, box:[x1,y1,x2,y2] (0..1), confidence, ts (ISO), thumb (path) }
+  sighting: { id (integer), item, room, spot, box:[x1,y1,x2,y2] (0..1), confidence (number|null), ts (ISO), thumb (path), place_id (string|null), place_source ("none"|"manual"|"automatic"), place_reason (string) }
+  place: { id, name, room, description, landmarks:[string...] }
+  connection: { from_place_id, to_place_id, departure_view, instruction, arrival_view }
 
 Endpoints:
-  POST /api/observe   multipart: frame (JPEG), room (string), ts (optional ISO)
+  POST /api/observe   multipart: frame (JPEG), room (optional string), ts (optional ISO), place_id (optional taught place ID), auto_place (optional bool, default true), session_id (optional PlaceID string)
       -> { sightings: [sighting...] }   saves sightings found in this frame, pushes an event to /ws/events
   GET  /api/where?item=wallet
-      -> { item, last: { room, spot, minutes_ago, thumb, confidence }, history: [ ... up to 5 ... ], say: "On your bedroom desk, next to the lamp, about 4 minutes ago." }  (404-style {found:false, say:"I haven't seen your wallet yet."} if never seen)
+      -> { item, found:true, last: { room, spot, minutes_ago, thumb, confidence }, history: [ ... up to 5 ... ], destination: place|null, say: "In your bedroom, on the desk, next to the lamp, about 4 minutes ago." }
+      -> HTTP 200 { item, found:false, last:null, history:[], destination:null, say:"I haven't seen your wallet yet." } if watched but never seen
+  GET  /api/memory/map -> { places:[place...], connections:[connection...] }
+  POST /api/memory/map JSON: { places:[place...], connections:[connection...] }
+      -> full merged map; omitted records retained, no deletions
+  GET  /api/memory/items -> [{ item, last:sighting|null, destination:place|null }...] for current watchlist
+  PUT  /api/memory/sightings/{sighting_id}/place JSON: { place_id:string|null }
+      -> updated sighting; null clears only this link
   POST /api/guide     multipart: frame (JPEG), item (string), yaw_deg (optional float)
-      -> { found, point:[x,y], box:[x1,y1,x2,y2], angle, clock, distance ("far"|"near"|"reach"), pan, say, beep_ms }
-      e.g. { "found": true, "point": [0.71, 0.62], "box": [0.66,0.55,0.77,0.69], "angle": 13.7, "clock": 12, "distance": "near", "pan": 0.46, "say": "Wallet slightly right, almost in reach", "beep_ms": 350 }
+      -> { found, point:[x,y], box:[x1,y1,x2,y2], angle, clock, distance ("far"|"near"|"reach"), pan, say, beep_ms,
+           mode ("visual"|"navigate"|"lost"), current_place (place_id|null), destination (place|null), next_instruction (string|null) }
+      visual e.g. { "found": true, "point": [0.71, 0.62], "box": [0.66,0.55,0.77,0.69], "angle": 13.7, "clock": 12,
+        "distance": "near", "pan": 0.46, "say": "Wallet slightly right, almost in reach", "beep_ms": 350,
+        "mode": "visual", "current_place": null, "destination": {...}|null, "next_instruction": null }
+      navigate e.g. { "found": false, "point": null, "box": null, "angle": null, "clock": null, "distance": null,
+        "pan": 0.0, "say": "Follow the hallway toward the kitchen entrance.", "beep_ms": 0,
+        "mode": "navigate", "current_place": "bedroom_door", "destination": {...}, "next_instruction": "Follow the hallway toward the kitchen entrance." }
   POST /api/profile   JSON: { watchlist:[{name,description,home_spot}], rooms:[str], guidance_style:"clock_face"|"left_right"|"beeps_only" }
       -> { ok:true }  stores the watchlist/rooms/style that the Purple setup agent produces
   GET  /api/profile   -> current profile (default watchlist: keys, wallet, phone, glasses, medication; rooms: bedroom, kitchen, living room)
   WS   /ws/events     server pushes JSON events: {type:"sighting"|"guide"|"say", ...payload}
+
+## Location memory semantics
+
+`place_id` is the observed object's destination, not the camera position.
+By default (`auto_place=true` and no explicit `place_id`), `/api/observe` and video import
+ask the vision model for per-object resting-place evidence alongside detections in a single
+structured request (`vision.observe`). Each detected object can either:
+- match an existing place in scope when at least two supplied fixed landmarks are visibly
+  matched and uniquely distinguish that candidate (`place_source: "automatic"`),
+- create a new discovered place (`auto_<hex>`) when at least two distinct fixed landmarks,
+  a name, and a description are visible and do not overlap two or more landmarks of an
+  existing place (`place_source: "automatic"`), or
+- remain unassigned (`place_id: null`, `place_source: "none"`, with an explanatory
+  `place_reason`) if carried, obscured, ambiguous, or conflicting within the frame. Object
+  detections are still saved when place evidence is unresolved.
+
+Supplying an explicit `place_id` on `/observe` or video import bypasses automatic place
+inference, applies that taught place to every detected item in the frame/clip
+(`place_source: "manual"`), and fills `room` from the taught place when `room` is omitted.
+Setting `auto_place=false` (or `--no-auto-places` on the CLI) disables automatic place
+inference and saves unassigned sightings (`place_source: "none"`). Manual assignment or
+clearing can also be done per sighting afterwards via `PUT /api/memory/sightings/{id}/place`
+or `memory_cli assign`. Old databases migrate automatically: existing IDs, timestamps, boxes,
+and thumbnails survive, existing `place_id` links get `place_source: "manual"`, and unlinked
+sightings start with `place_id: null`, `place_source: "none"`, `place_reason: ""`.
+Re-importing a video still adds duplicates.
+
+`room` is optional on `/api/observe` and video import. When supplied, it limits candidate
+places to that room and overrides any model-inferred room label. When omitted, the matched
+place's room, the model-inferred room, or `"unknown room"` is used. `session_id` (matching
+the `PlaceID` pattern) optionally scopes up to 8 recent observations from the last 20 seconds
+as continuity hints for the model.
+
+`destination` always comes from the newest sighting. If that sighting is unassigned, it is null
+even if an older sighting had a place. Empty detections preserve last-seen memory. `found:true`
+means seen previously, not currently visible or confirmed still there. Profile `home_spot`
+never substitutes for an observation. Historical observations are sorted by timestamp instant,
+with sighting ID breaking ties; new writes use UTC. The latest sighting ID is in `history[0].id`.
+
+Places can be explicitly taught or automatically discovered from object sightings; connections
+are always explicitly taught, directed, and do not imply a reverse path.
+`departure_view` and `arrival_view` store the facing/view context for that direction.
+Map updates are atomic merges, not replacements. A place ID cannot change rooms. Profile
+updates retain places and sightings; only currently watched items are returned by item lookup.
+`/api/guide` localizes the camera against taught places and plans a directed BFS route when the
+target item is not visible and the newest sighting has a destination. Obstacle detection and
+ElevenLabs are not implemented.
+
+Validation: place IDs match `[a-z0-9][a-z0-9_-]{0,79}`; names/rooms/landmarks are nonblank,
+trimmed strings up to 160 characters; descriptions/view context/instructions are nonblank,
+trimmed strings up to 1000 characters. A place accepts at most 20 landmarks (defaults empty).
+Each import accepts up to 100 places and 500 connections (both default empty), with no duplicate
+IDs/edges, self-connections, or unknown endpoints. Extra fields in map/assignment JSON are rejected.
+Unknown referenced place or sighting: 404. Room mismatch or attempting to move a stable place ID
+to another room: 409. Malformed JSON/model validation: 422. Errors use `{detail: ...}`.
+Room matching ignores case and surrounding whitespace. Invalid observation assignments are
+rejected before provider calls or saved crops. Memory edits do not publish WebSocket events.
+
+See [MEMORY.md](MEMORY.md) for a complete mock test and assignment of earlier real sightings.
 
 ## Guidance math (implement in guidance.py as pure, unit-tested functions)
 - angle_deg(x, fov_h) = (x - 0.5) * fov_h        (x in 0..1, left to right; FOV default 65 from env FOV_H_DEGREES)
@@ -33,24 +111,35 @@ Endpoints:
 
 # Scaffold notes (how the code resolves details the contract leaves open)
 
-Everything above is verbatim from the project brief. The items below are what the scaffold actually does; change them deliberately and update this file.
+The endpoint sketch originated in the project brief and is maintained to match the implementation.
+The notes below specify additional behavior; update both when behavior changes.
 
-- **`/api/where` never returns HTTP 404.** Never-seen is `200 {item, found:false, last:null, history:[], say:"I haven't seen your wallet yet."}`. An item not on the watchlist is also `found:false` with `say:"I'm not watching for X."`. Found responses include `found:true`.
-- **`/api/where` `say` wording:** `"In your bedroom, on the desk, next to the lamp, about 4 minutes ago."` (room + spot as stored). `history` entries are full sighting records, newest first. `minutes_ago` is a float.
-- **`item` matching:** names and aliases are case-insensitive; "my"/"the" prefixes and a trailing plural "s" are ignored ("my meds" -> medication).
+- **Vision implementation:** `backend/app/vision/vision.py`, re-exported through the `vision` package.
+- **`confidence` is nullable:** real Perceptron labels use `null` because no calibrated score is available. Mock scores remain numeric. SQLite automatically migrates older non-null columns while preserving existing sightings.
+- **Frame preparation:** `/api/observe` and `/api/guide` decode and orient the uploaded image, strip metadata, and resize proportionally to `VISION_FRAME_MAX_PX` (default 640). All boxes, live dashboard frames, and saved crops use this same orientation. JPEG, PNG, and WebP are accepted; invalid images return 422 and uploads over 8 MiB return 413.
+- **Vision failures:** HTTP 503 `{detail: ...}` for provider errors, timeouts, incomplete replies, or invalid labels. No sightings are saved for a failed frame. A successful empty list means no current detection, and never deletes previous sightings. The client never falls back to mock on an error.
+- **Timestamps:** new `/api/observe` timestamps are normalized to UTC; invalid ISO timestamps return 422. The video importer requires a recording start time with a zone and adds each frame's presentation offset. Existing naive API timestamps are still treated as UTC.
+
+- **`/api/where` never returns HTTP 404.** Never-seen is `200 {item, found:false, last:null, history:[], destination:null, say:"I haven't seen your wallet yet."}` for both profile watchlist items and open-vocabulary objects (e.g. `"water bottle"`, `"cup"`). Found responses include `found:true`.
+- **`/api/where` `say` wording:** unassigned sightings retain `"In your bedroom, on the desk, next to the lamp, about 4 minutes ago."` (room + spot), or `"Last seen on the desk, next to the lamp, about 4 minutes ago."` when `room` is `"unknown room"`. Assigned sightings use `"Last seen at counter beside the sink in your kitchen, about 4 minutes ago."` (omitting `"in your unknown room"` when the place's room is `"unknown room"`). `history` entries are full sighting records, newest first. `minutes_ago` is a float.
+- **`item` matching & open-vocabulary:** names, watchlist aliases, and common everyday object synonyms (`cup`/`mug`/`coffee cup`/`tumbler`, `water bottle`/`bottle`/`thermos`, `bag`/`backpack`/`purse`, `headphones`/`earbuds`/`airpods`, `cane`/`white cane`, etc.) are case-insensitive; `"my"`/`"the"`/`"a"`/`"an"` prefixes and a trailing plural `"s"` are ignored (`"my meds"` -> `medication`, `"my mug"` -> `cup`, `"my bottle"` -> `water bottle`). `/api/observe` detects both watchlist items and any other visible everyday personal/household objects on surfaces, and `/api/guide` can guide to any item on demand.
 - **`thumb`** is a URL path served by the backend: `/api/thumbs/<id>.jpg` (96 px max crop around the box). It is `""` if the frame could not be decoded.
-- **`/api/guide` when not found:** `found:false`, `point/box/angle/clock/distance` are `null`, `pan` 0, `beep_ms` 0 (silence). `say` is `""` until the item has been missing for 2 s, then `"Lost it. Turn slowly left."` once.
-- **`/api/guide` `say`** is `""` when the direction has not changed since the last cue (server tracks this per item; a pause longer than 10 s starts a fresh session). The returned `angle` is smoothed against the previous angle if it was seen within 3 s.
+- **`/api/guide` modes:**
+  - **visual:** target item is in the current frame. Existing pan/clock/beep guidance; `mode:"visual"`. `destination` is filled from the newest sighting when assigned. `current_place` and `next_instruction` are null (localization is skipped to save a provider call).
+  - **navigate:** item not visible, destination known, current place localized, and a directed path exists (or the user is already at the destination). `found:false`, geometry null, `beep_ms` 0. `say` / `next_instruction` use the next taught connection instruction; speak only when the hop changes. At the destination without a visible item: `say` like `"You're at counter beside the sink. Look around slowly."` with `next_instruction` null.
+  - **lost:** cannot offer visual or navigate cues. Includes: no destination on the newest sighting (legacy `"Lost it. Turn slowly left."` after 2 s), destination known but localization failed, or no directed path. Honest fallbacks such as `"Last seen at …, but I can't tell where you are yet."`
+- **`/api/guide` when not found (visual-lost, no destination):** `found:false`, `point/box/angle/clock/distance` are `null`, `pan` 0, `beep_ms` 0 (silence). `say` is `""` until the item has been missing for 2 s, then `"Lost it. Turn slowly left."` once.
+- **`/api/guide` `say`** is `""` when the direction or navigate hop has not changed since the last cue (server tracks this per item; a pause longer than 10 s starts a fresh session). The returned `angle` is smoothed against the previous angle if it was seen within 3 s.
 - **`yaw_deg`** is accepted but not used server-side; yaw compensation happens in the browser (`web/src/phone/orientation.js`). Compensation wraps the yaw difference across 0/360.
 - **`clock_hour`** rounds halves up (`floor(x + 0.5)`) instead of Python's banker's `round()`, so 15 deg -> 1 and -15 deg -> 12.
 - **`distance_bucket`** rounds the box height to 4 decimals before comparing, so float noise (`0.6 - 0.5 = 0.0999...`) cannot flip a boundary.
 - **Extra endpoint:** `GET /api/health -> {ok, mode, mock}` so UIs can show a MOCK badge.
 - **WebSocket events** all carry `mock: bool`:
   - `{type:"sighting", sightings:[sighting...], frame: <data URL | null>}` one per `/api/observe` call
-  - `{type:"guide", item, frame, found, point, box, angle, clock, distance, pan, say, beep_ms}` one per `/api/guide` call
+  - `{type:"guide", item, frame, found, point, box, angle, clock, distance, pan, say, beep_ms, mode, current_place, destination, next_instruction}` one per `/api/guide` call
   - `{type:"say", text, source:"where"|"guide"}` whenever the app has something to speak
   - `frame` is forwarded live to the dashboard only (omitted when over 200 KB) and never stored.
-- **Mock hints:** header `X-Mock-Item-X: 0.8` (or query `?mock_x=0.8`) forces the detected item's center x; `X-Mock-Item-H` / `?mock_h=0.4` forces box height (0.4 at the default y gives `"reach"`).
+- **Mock hints:** header `X-Mock-Item-X: 0.8` (or query `?mock_x=0.8`) forces the detected item's center x; `X-Mock-Item-H` / `?mock_h=0.4` forces box height (0.4 at the default y gives `"reach"`). `X-Mock-Hide: 1` / `?mock_hide=1` forces no detection so navigate can run. `X-Mock-Place: bedroom_door` / `?mock_place=bedroom_door` forces mock localization (`unknown` forces null).
 
 ---
 
@@ -63,7 +152,7 @@ Everything above is verbatim from the project brief. The items below are what th
 - `text` is 1 to 500 characters. `provider` is whichever answered: `mock` (keyword matching, the default), `purple`, `gemini`, `openai_compat`, or `keyword_fallback` (every configured provider failed, timed out or had no key).
 - **Provider order: purple -> gemini -> keyword.** The chain starts at `LLM_PROVIDER` and falls through the later providers on any error, timeout (3 s) or missing key; it always ends at keyword matching. `LLM_PROVIDER=purple` tries purple, gemini, keyword. `gemini` tries gemini, keyword. `mock` and `openai_compat` do not use gemini. A provider with no key configured is skipped without a request.
 - **Privacy, all external providers:** only the user's transcribed text, the last 6 turns, and watchlist names, aliases and room names (plus the current room) are sent. Never camera frames, thumbnails, descriptions, home spots or sighting history. Keys, Authorization headers and request bodies are never logged.
-- The backend asks a model (tool calling: `find_item`, `where_is_item`, `stop_guidance`, `set_room`) what the user wants. **`item` and `room` are validated against the stored profile** (names, aliases, rooms). An unknown item or room becomes `intent:"chitchat"` with one short question in `say`.
+- The backend asks a model (tool calling: `find_item`, `where_is_item`, `stop_guidance`, `set_room`) what the user wants. **`item` and `room` are validated against the stored profile** (names, aliases, rooms). An unknown room, or a missing item, becomes `intent:"chitchat"` with one short question in `say`. Item matching follows the rest of the app: it is open-vocabulary (an object off the watchlist is searched on demand), and the model is told to prefer watchlist names.
 - **`say` for find / where / stop / set_room is written by the app, never the model.** For `where` it is exactly the `GET /api/where` answer built from stored sightings. Only `chitchat` speaks model text (collapsed whitespace, 200 characters max).
 - `find` means "start guidance for `item`"; the phone then calls `/api/guide`. "I can't find my keys" maps to `find`, not `where`.
 - `/api/chat` does not publish a separate `say` event (the `chat` event is the log entry). Chat text lives only in memory and the live event; nothing is written to the database.

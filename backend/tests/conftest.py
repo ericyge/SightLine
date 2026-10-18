@@ -38,6 +38,7 @@ def client(tmp_path, monkeypatch):
     from app import main, vision
     vision.reset_vision()
     main._guide_states.clear()
+    main._navigate_states.clear()
     (tmp_path / "thumbs").mkdir()
     with TestClient(main.app) as c:   # `with` keeps one event loop so WebSocket events flow
         yield c

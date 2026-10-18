@@ -40,11 +40,12 @@ export function chat(text, history, currentRoom) {
 export const where = (item) => fetch(`/api/where?item=${encodeURIComponent(item)}`).then(json);
 
 /** @param {Blob} frame JPEG */
-export function observe(frame, room, ts) {
+export function observe(frame, room, ts, sessionId) {
   const body = new FormData();
   body.append("frame", frame, "frame.jpg");
-  body.append("room", room);
+  if (room) body.append("room", room);
   if (ts) body.append("ts", ts);
+  if (sessionId) body.append("session_id", sessionId);
   return fetch("/api/observe", { method: "POST", body }).then(json);
 }
 

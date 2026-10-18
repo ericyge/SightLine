@@ -111,6 +111,21 @@ class GuideState:
     touched: float = 0.0
 
 
+@dataclass
+class NavigateState:
+    """Per-item room-to-room cue tracking. Speak only when the hop or fallback key changes."""
+    since: float
+    last_key: str | None = None
+    touched: float = 0.0
+
+
+def navigate_say(text: str, key: str, last_key: str | None) -> tuple[str, str]:
+    """Return (spoken text, new key); empty text when the navigation cue has not changed."""
+    if key == last_key:
+        return "", last_key
+    return text, key
+
+
 def compute_guide(item: str, box: list[float] | None, state: GuideState, style: str,
                   fov_h: float, now: float) -> dict:
     """One guidance step from a detection (box or None) to a GuideResponse-shaped dict."""

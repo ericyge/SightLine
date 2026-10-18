@@ -11,8 +11,9 @@ For the full picture (problem, architecture, team, tracks, status) read [docs/PR
 
 ## Mobile app (React Native + Expo)
 
-The native phone app lives in `mobile/`. It currently shows the rear camera with
-accessible permission controls. To run it on your phone with Expo Go:
+The native phone app lives in `mobile/`. It shows the rear camera with accessible permission controls and,
+once connected to the backend, sends camera frames, takes spoken or typed requests (Gemini), speaks replies,
+and plays directional beeps. To run it on your phone with Expo Go:
 
 ```powershell
 cd mobile
@@ -20,10 +21,9 @@ npm ci
 npm start
 ```
 
-Scan the QR code with your phone on the same Wi-Fi network and allow camera access.
-See [mobile/README.md](mobile/README.md) for setup and current scope. The mobile
-camera preview runs independently; backend memory, speech, and guidance are not
-connected to the native app yet.
+Scan the QR code with your phone on the same Wi-Fi network and allow camera access. The phone must be able to
+reach the backend (see [mobile/README.md](mobile/README.md) for the server address, tunnels, and the debug
+counters). It has not been tested beyond a first run on one iPhone.
 
 ## Browser prototype quickstart (PowerShell, about 2 minutes)
 
@@ -79,15 +79,21 @@ ngrok http 5173
 
 Open `https://<your-subdomain>.ngrok-free.app/phone` on the phone. On iPhone, the first press of "Hold to talk" asks for motion-sensor permission. Do not tunnel port 8000.
 
-### Real vision with Perceptron (live mode)
-Default is mock (fake detections, no key). To use real Perceptron, add to `.env` (never committed) and restart the backend:
+### Real vision with Perceptron
+Default is mock (fake detections, no key). Add to `.env` (never committed) and restart the backend. There are two real clients, chosen with `PERCEPTRON_MODE`:
+
+| Mode | Use it for | Behavior |
+|---|---|---|
+| `perceptron` | memory with places (full client, `backend/app/vision/vision.py`) | place-aware observations, localization, reference photos; a provider failure is HTTP 503; default model `perceptron-mk1.5`, 15 s timeout |
+| `live` | fast guidance (`backend/app/vision/live.py`) | one `detect` call per frame, 2 s timeout, errors mean "not seen", one call in flight (extra frames get `204`), latency stats on the dashboard |
+
 ```
-PERCEPTRON_MODE=live
+PERCEPTRON_MODE=live            # or perceptron
 PERCEPTRON_API_KEY=...
-# PERCEPTRON_MODEL=            # blank = perceptron-mk1, the id Perceptron's docs confirm
-# GUIDE_MAX_FPS=3              # guidance frames per second per phone; tune after measuring
+# PERCEPTRON_MODEL=             # live: blank = perceptron-mk1 (the id Perceptron's docs confirm)
+# GUIDE_MAX_FPS=3               # guidance frames per second per phone; tune after measuring
 ```
-`pip install -r backend/requirements.txt` installs the `perceptron` SDK. The frontend never calls Perceptron; the backend owns the key.
+`pip install -r backend/requirements.txt` installs the `perceptron` SDK. The frontend never calls Perceptron; the backend owns the key. See [the vision guide](docs/VISION.md) for recorded-video ingestion, latency benchmarks, personal item reference photos, and macOS setup. All commands also support mock mode without a key.
 
 **Check your key, the coordinates and the latency first** (sends one image to Perceptron):
 ```powershell
@@ -95,9 +101,9 @@ cd backend
 .\.venv\Scripts\python scripts\perceptron_probe.py C:\path\to\frame.jpg "red leather wallet"
 .\.venv\Scripts\python scripts\perceptron_probe.py C:\path\to\frame.jpg "red leather wallet" --repeat 20
 ```
-It prints the raw box (0-1000 grid), the converted 0..1 box, center x, height, and elapsed time; `--repeat` adds p50/p95.
+It uses the `live` client and prints the raw box (0-1000 grid), the converted 0..1 box, center x, height, and elapsed time; `--repeat` adds p50/p95. (The full client has its own benchmark in `python -m app.vision.cli`.)
 
-How live mode behaves: one Perceptron call at a time. A frame that arrives while another is being processed is dropped (the API answers `204`, the phone keeps its last result and local beeps). A timeout (2 s), 429 or any error counts as "not seen" and never crashes a request. The dashboard shows live p50/p95 latency, errors and dropped frames.
+How `live` mode behaves: one Perceptron call at a time. A frame that arrives while another is being processed is dropped (the API answers `204`, the phone keeps its last result and local beeps). A timeout (2 s), 429 or any error counts as "not seen" and never crashes a request. The dashboard shows live p50/p95 latency, errors and dropped frames.
 
 ### Natural conversation (optional)
 `POST /api/chat` works out what the user wants from free speech. It runs with **no keys** using keyword matching (`LLM_PROVIDER=mock`, the default). To use a real model, set these in `.env` and restart the backend.
@@ -147,18 +153,26 @@ Chat replies (the `say` from `/api/chat`) use that voice. Fast guidance cues ("W
 Frames are processed and discarded; only item, place, time and a small thumbnail are stored, never video. Per service:
 | Service | When | What is sent |
 |---|---|---|
-| Perceptron | `PERCEPTRON_MODE=live` | the current camera frame (JPEG) and the item descriptions |
+| Perceptron | `PERCEPTRON_MODE=live` or `perceptron` | the current camera frame (JPEG) and the item descriptions |
 | Gemini / Purple | `LLM_PROVIDER` is not `mock` | your words, the last 6 turns, item/alias/room names. Never frames, thumbnails or sighting history |
 | ElevenLabs speech-to-text | `STT_PROVIDER=elevenlabs` | your recorded voice clip |
 | ElevenLabs text-to-speech | `TTS_PROVIDER=elevenlabs` | **only the reply text** to be spoken. Never your audio or camera frames |
 
 Keys, the text being spoken and audio are never logged. Short spoken phrases are cached in server memory (as hashes), not on disk.
 
+### Teach and inspect location memory
+
+See [the memory guide](docs/MEMORY.md) for an isolated mock walkthrough, the example map,
+and how to assign your existing real video sightings without running Perceptron again.
+From `backend/`, `python -m app.memory.cli where wallet` shows saved sightings
+and the newest sighting's destination. `python -m app.memory.cli --help` lists teaching,
+map inspection, and assignment commands.
+
 ## Layout
 
 | Path                       | What                                                                                                                              |
 | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `backend/app/`             | FastAPI app: `main.py` routes, `guidance.py` pure math, `vision.py` (the only Perceptron code), `db.py`, `events.py`, `models.py` |
+| `backend/app/`             | FastAPI app: `main.py` routes, `guidance.py` pure math, `vision/` (the only Perceptron code, plus video tools), `memory/` places and observation pipeline, `frames.py`, `db.py`, `events.py`, `models.py` |
 | `mobile/`                 | React Native + Expo mobile app; currently a camera preview with permission handling |
 | `web/src/phone/`           | Phone UI, beep engine, speech, gyroscope, API wrappers                                                                            |
 | `web/src/dashboard/`       | Judge-facing live dashboard                                                                                                       |

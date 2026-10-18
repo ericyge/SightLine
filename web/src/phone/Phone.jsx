@@ -54,7 +54,8 @@ export default function Phone() {
   const videoRef = useRef(null);
   const { ready, error } = useCamera(videoRef);
   const [rooms, setRooms] = useState(["bedroom", "kitchen", "living room"]);
-  const [room, setRoom] = useState("bedroom");
+  const [room, setRoom] = useState("");
+  const [sessionId] = useState(() => crypto.randomUUID());
   const [status, setStatus] = useState("Ready. Hold the button and ask where something is.");
   const [cue, setCue] = useState("");
   const [guiding, setGuiding] = useState(null); // item name while in guidance mode
@@ -71,7 +72,7 @@ export default function Phone() {
   roomRef.current = room;
 
   useEffect(() => {
-    api.getProfile().then((p) => { setRooms(p.rooms); setRoom(p.rooms[0] ?? "room"); }).catch(() => {});
+    api.getProfile().then((p) => setRooms(p.rooms)).catch(() => {});   // room stays "Automatic" until chosen
     api.getHealth().then((h) => {
       setMock(h.mock);
       setSttMode(h.stt ?? "browser");
@@ -88,7 +89,7 @@ export default function Phone() {
       while (!cancelled) {
         const t0 = performance.now();
         try {
-          await api.observe(await captureFrame(videoRef.current), roomRef.current);
+          await api.observe(await captureFrame(videoRef.current), roomRef.current, undefined, sessionId);
         } catch {
           // TODO(C): offline fallback / error state (queue sightings, show "offline").
         }
@@ -96,7 +97,7 @@ export default function Phone() {
       }
     })();
     return () => { cancelled = true; };
-  }, [ready, guiding]);
+  }, [ready, guiding, sessionId]);
 
   // Guidance loop: as fast as the backend answers, capped (GUIDE_MAX_FPS), one request in flight and
   // never queued; plus a fast local loop that keeps the beeps panned between answers.
@@ -271,8 +272,9 @@ export default function Phone() {
       {mock && <div className="mock-badge" role="status">MOCK MODE: fake detections</div>}
       <video ref={videoRef} className="preview" playsInline muted aria-label="Camera preview" />
       <label className="room">
-        Room
-        <select value={room} onChange={(e) => setRoom(e.target.value)} aria-label="Current room">
+        Room (optional)
+        <select value={room} onChange={(e) => setRoom(e.target.value)} aria-label="Room override, automatic by default">
+          <option value="">Automatic</option>
           {rooms.map((r) => <option key={r}>{r}</option>)}
         </select>
       </label>

@@ -8,8 +8,10 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image
@@ -28,6 +30,28 @@ DEFAULT_ITEMS = [
 ]
 DEFAULT_ROOMS = ["bedroom", "kitchen", "living room"]
 
+COMMON_SYNONYMS: dict[str, list[str]] = {
+    "keys": ["key", "keychain", "house keys", "car keys", "key ring", "keyring"],
+    "wallet": ["billfold", "cardholder", "card holder", "pocketbook"],
+    "phone": ["cell phone", "mobile", "smartphone", "iphone", "cellphone", "mobile phone"],
+    "glasses": ["eyeglasses", "specs", "spectacles", "reading glasses", "sunglasses"],
+    "medication": ["meds", "pills", "medicine", "pill bottle", "prescription", "vitamins"],
+    "water bottle": ["bottle", "waterbottle", "drink bottle", "thermos", "flask", "hydroflask", "sports bottle"],
+    "cup": ["mug", "coffee cup", "coffee mug", "teacup", "tea cup", "tumbler", "drinking glass", "glass"],
+    "headphones": ["earbuds", "earphones", "airpods", "headset", "earbud", "earphone"],
+    "remote": ["remote control", "tv remote", "controller"],
+    "bag": ["backpack", "purse", "handbag", "tote", "tote bag", "satchel", "duffel bag"],
+    "cane": ["white cane", "walking stick", "walking cane", "mobility cane"],
+    "laptop": ["computer", "notebook computer", "macbook", "chromebook"],
+    "charger": ["charging cable", "power cord", "adapter", "phone charger", "usb cable"],
+    "book": ["notebook", "journal", "textbook", "paperback"],
+    "watch": ["wristwatch", "smartwatch", "apple watch"],
+    "hat": ["cap", "beanie", "baseball cap"],
+    "shoes": ["shoe", "sneakers", "sneaker", "slippers", "slipper", "boots", "sandals"],
+    "umbrella": ["parasol"],
+    "inhaler": ["asthma inhaler"],
+}
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
     name TEXT PRIMARY KEY, aliases TEXT NOT NULL DEFAULT '[]',
@@ -37,11 +61,20 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sightings (
     id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT NOT NULL, room TEXT NOT NULL,
     spot TEXT NOT NULL, x1 REAL, y1 REAL, x2 REAL, y2 REAL,
-    confidence REAL NOT NULL, ts TEXT NOT NULL, thumb TEXT NOT NULL DEFAULT '');
+    confidence REAL, ts TEXT NOT NULL, thumb TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_sightings_item_ts ON sightings (item, ts);
+CREATE TABLE IF NOT EXISTS places (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, room TEXT NOT NULL,
+    description TEXT NOT NULL, landmarks TEXT NOT NULL DEFAULT '[]');
+CREATE TABLE IF NOT EXISTS place_connections (
+    from_place_id TEXT NOT NULL REFERENCES places(id),
+    to_place_id TEXT NOT NULL REFERENCES places(id),
+    departure_view TEXT NOT NULL, instruction TEXT NOT NULL, arrival_view TEXT NOT NULL,
+    PRIMARY KEY (from_place_id, to_place_id), CHECK (from_place_id != to_place_id));
 """
 
 _initialized: set[str] = set()
+_schema_lock = threading.RLock()
 
 
 def db_path() -> str:
@@ -58,15 +91,54 @@ def connect():
     path = db_path()
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
     try:
-        if path not in _initialized:
-            conn.executescript(SCHEMA)
-            _seed_defaults(conn)
-            _initialized.add(path)
+        with _schema_lock:
+            if path not in _initialized:
+                conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA)
+                _migrate_confidence(conn)
+                _migrate_memory(conn)
+                _seed_defaults(conn)
+                conn.commit()
+                _initialized.add(path)
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
+
+
+def _migrate_confidence(conn: sqlite3.Connection) -> None:
+    """Preserve existing sightings while allowing an unknown provider confidence."""
+    columns = conn.execute("PRAGMA table_info(sightings)").fetchall()
+    if not any(c["name"] == "confidence" and c["notnull"] for c in columns):
+        return
+    conn.execute("""CREATE TABLE sightings_nullable (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT NOT NULL, room TEXT NOT NULL,
+        spot TEXT NOT NULL, x1 REAL, y1 REAL, x2 REAL, y2 REAL,
+        confidence REAL, ts TEXT NOT NULL, thumb TEXT NOT NULL DEFAULT '')""")
+    conn.execute("INSERT INTO sightings_nullable SELECT * FROM sightings")
+    conn.execute("DROP TABLE sightings")
+    conn.execute("ALTER TABLE sightings_nullable RENAME TO sightings")
+    conn.execute("CREATE INDEX idx_sightings_item_ts ON sightings (item, ts)")
+
+
+def _migrate_memory(conn: sqlite3.Connection) -> None:
+    """Old observations retain unknown place links rather than guessed destinations."""
+    columns = {c["name"] for c in conn.execute("PRAGMA table_info(sightings)")}
+    if "place_id" not in columns:
+        conn.execute("ALTER TABLE sightings ADD COLUMN place_id TEXT REFERENCES places(id)")
+    if "place_source" not in columns:
+        conn.execute("ALTER TABLE sightings ADD COLUMN place_source TEXT NOT NULL DEFAULT 'none'")
+        conn.execute("UPDATE sightings SET place_source='manual' WHERE place_id IS NOT NULL")
+    if "place_reason" not in columns:
+        conn.execute("ALTER TABLE sightings ADD COLUMN place_reason TEXT NOT NULL DEFAULT ''")
+    if "session_id" not in columns:
+        conn.execute("ALTER TABLE sightings ADD COLUMN session_id TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sightings_place ON sightings (place_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sightings_session ON sightings (session_id, ts)")
 
 
 def _seed_defaults(conn: sqlite3.Connection) -> None:
@@ -125,17 +197,94 @@ def guidance_style() -> str:
     return get_profile()["guidance_style"]
 
 
-def resolve_item(text: str) -> str | None:
-    """Map spoken text ("my cell phone", "keys") to a watchlist item name, or None."""
-    t = text.strip().lower()
-    for prefix in ("my ", "the "):
+def _clean_item_name(text: str | None) -> str:
+    """Normalize a spoken or model-supplied object name."""
+    if not text:
+        return ""
+    t = " ".join(text.strip(" \t\r\n?.!,;:\"'()[]{}").lower().split())
+    for prefix in ("my ", "the ", "a ", "an ", "some ", "pair of "):
         if t.startswith(prefix):
-            t = t[len(prefix):]
-    for item in list_items():
-        names = {item["name"], *[a.lower() for a in item["aliases"]]}
-        if t in names or t.rstrip("s") in names:
+            t = t[len(prefix):].strip()
+    if not t or len(t) > 80 or not any(ch.isalnum() for ch in t):
+        return ""
+    return t
+
+
+def _match_watchlist(cleaned: str, items: list[dict] | None = None) -> str | None:
+    if not cleaned:
+        return None
+    forms = {cleaned, cleaned.rstrip("s")} - {""}
+    for item in (items if items is not None else list_items()):
+        names = {item["name"].lower(), *[a.lower() for a in item.get("aliases", [])]}
+        singular_names = {n.rstrip("s") for n in names} - {""}
+        if forms & (names | singular_names):
             return item["name"]
     return None
+
+
+def is_watched(text: str) -> bool:
+    """True when text matches an item in the active profile watchlist."""
+    return _match_watchlist(_clean_item_name(text)) is not None
+
+
+def canonicalize_item(text: str, watchlist: list[dict] | None = None) -> str | None:
+    """Map an item label or query to a watchlist name, common canonical name, or normalized name."""
+    t = _clean_item_name(text)
+    if not t:
+        return None
+    watched = _match_watchlist(t, watchlist)
+    if watched is not None:
+        return watched
+    forms = {t, t.rstrip("s")} - {""}
+    for canonical, synonyms in COMMON_SYNONYMS.items():
+        group = {canonical, *synonyms}
+        singular_group = {g.rstrip("s") for g in group} - {""}
+        if forms & (group | singular_group):
+            return canonical
+    return t
+
+
+def seen_items() -> list[str]:
+    """Distinct item names observed in sightings, most recent first."""
+    with connect() as c:
+        rows = c.execute(
+            "SELECT item FROM sightings GROUP BY item ORDER BY MAX(julianday(ts)) DESC, MAX(id) DESC"
+        ).fetchall()
+    return [r["item"] for r in rows]
+
+
+def resolve_item(text: str) -> str | None:
+    """Map spoken text ("my cell phone", "water bottle", "mug") to a canonical or seen item name."""
+    t = _clean_item_name(text)
+    if not t:
+        return None
+    watched = _match_watchlist(t)
+    if watched is not None:
+        return watched
+    canon = canonicalize_item(t) or t
+    observed = seen_items()
+    for seen in observed:
+        if seen.lower() in {t, canon} or (canonicalize_item(seen) or seen.lower()) == canon:
+            return canon if canon in COMMON_SYNONYMS else seen
+    forms = {t, t.rstrip("s")} - {""}
+    for seen in observed:
+        tokens = set(seen.lower().split()) | {w.rstrip("s") for w in seen.lower().split()}
+        if forms & tokens:
+            return seen
+    return canon
+
+
+def target_item(text: str) -> dict | None:
+    """Build a detection target dict for any item (watchlist or open-vocabulary on-demand)."""
+    name = resolve_item(text)
+    if not name:
+        return None
+    watched = get_item(name)
+    if watched:
+        return {**watched, "watched": True}
+    synonyms = COMMON_SYNONYMS.get(name, [])
+    desc = f"a {name}" + (f" (or {', '.join(synonyms[:6])})" if synonyms else "")
+    return {"name": name, "aliases": synonyms, "description": desc, "home_spot": "", "watched": False}
 
 
 def resolve_room(text: str) -> str | None:
@@ -173,21 +322,48 @@ def save_thumb(frame: bytes, box: list[float]) -> str:
     return f"{THUMB_URL_PREFIX}/{fname}"
 
 
-def add_sighting(item: str, room: str, spot: str, box: list[float], confidence: float,
-                 ts: str, thumb: str) -> dict:
+def add_sighting(item: str, room: str, spot: str, box: list[float], confidence: float | None,
+                 ts: str, thumb: str, place_id: str | None = None) -> dict:
     """Insert a sighting and return it in contract shape."""
     with connect() as c:
-        c.execute("INSERT INTO sightings (item,room,spot,x1,y1,x2,y2,confidence,ts,thumb) "
-                  "VALUES (?,?,?,?,?,?,?,?,?,?)", (item, room, spot, *box, confidence, ts, thumb))
-    return {"item": item, "room": room, "spot": spot, "box": box,
-            "confidence": confidence, "ts": ts, "thumb": thumb}
+        return insert_sighting(c, item, room, spot, box, confidence, ts, thumb, place_id)
+
+
+def insert_sighting(c, item, room, spot, box, confidence, ts, thumb, place_id=None,
+                    place_source=None, place_reason="", session_id=None) -> dict:
+    """Insert within a caller's transaction so a complete observed frame is atomic."""
+    when = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    ts = (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).astimezone(timezone.utc).isoformat()
+    if place_id is not None:
+        place = c.execute("SELECT room FROM places WHERE id=?", (place_id,)).fetchone()
+        if place is None or place["room"].casefold() != room.strip().casefold():
+            raise ValueError("Sighting place must exist and belong to the supplied room.")
+    source = place_source or ("manual" if place_id else "none")
+    cursor = c.execute("""INSERT INTO sightings
+        (item,room,spot,x1,y1,x2,y2,confidence,ts,thumb,place_id,place_source,place_reason,session_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (item, room, spot, *box, confidence, ts, thumb, place_id, source, place_reason, session_id))
+    row = c.execute("SELECT * FROM sightings WHERE id=?", (cursor.lastrowid,)).fetchone()
+    return sighting_record(row)
+
+
+def sighting_record(row: sqlite3.Row) -> dict:
+    """Public observation including a stable ID and optional taught destination."""
+    return {"id": row["id"], "item": row["item"], "room": row["room"], "spot": row["spot"],
+            "box": [row["x1"], row["y1"], row["x2"], row["y2"]], "confidence": row["confidence"],
+            "ts": row["ts"], "thumb": row["thumb"], "place_id": row["place_id"],
+            "place_source": row["place_source"], "place_reason": row["place_reason"]}
 
 
 def recent_sightings(item: str, limit: int = 5) -> list[dict]:
-    """Newest sightings of item first, in contract shape."""
+    """Newest sightings of item (including common synonyms) first, in contract shape."""
+    canon = canonicalize_item(item) or item.strip().lower()
+    candidates = sorted({item.strip().lower(), canon, *COMMON_SYNONYMS.get(canon, [])} - {""})
+    placeholders = ",".join("?" for _ in candidates)
     with connect() as c:
-        rows = c.execute("SELECT * FROM sightings WHERE item=? ORDER BY ts DESC, id DESC LIMIT ?",
-                         (item, limit)).fetchall()
-    return [{"item": r["item"], "room": r["room"], "spot": r["spot"],
-             "box": [r["x1"], r["y1"], r["x2"], r["y2"]], "confidence": r["confidence"],
-             "ts": r["ts"], "thumb": r["thumb"]} for r in rows]
+        rows = c.execute(
+            f"SELECT * FROM sightings WHERE lower(item) IN ({placeholders}) "
+            "ORDER BY julianday(ts) DESC, id DESC LIMIT ?",
+            (*candidates, limit),
+        ).fetchall()
+    return [sighting_record(r) for r in rows]

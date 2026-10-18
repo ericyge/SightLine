@@ -7,4 +7,7 @@ pillow>=10.3
 pytest>=8.0
 httpx>=0.27
 truststore>=0.9
-perceptron>=0.4.0   # only imported when PERCEPTRON_MODE=live
+# Verified SDK surface; mock mode still needs no API key. (Both live vision clients use it.)
+perceptron==0.4.0
+# Timestamp-aware local video decoding; bundles FFmpeg libraries.
+av>=16.1,<17

@@ -52,7 +52,9 @@ def test_where_never_seen(client):
 
 def test_where_unknown_item(client):
     r = client.get("/api/where", params={"item": "unicorn"}).json()
-    assert r["found"] is False and "not watching" in r["say"]
+    assert r["found"] is False and r["say"] == "I haven't seen your unicorn yet."
+    bad = client.get("/api/where", params={"item": "???"}).json()
+    assert bad["found"] is False and "which item" in bad["say"]
 
 
 def test_where_after_observe_with_alias(client, jpeg):
@@ -61,7 +63,7 @@ def test_where_after_observe_with_alias(client, jpeg):
     r = client.get("/api/where", params={"item": "my wallet"}).json()
     assert r["found"] and r["last"]["room"] == "bedroom"
     assert round(r["last"]["minutes_ago"]) == 4
-    assert r["say"] == "In your bedroom, on the desk, next to the lamp, about 4 minutes ago."
+    assert r["say"] == "Last seen at demo desk in your bedroom, about 4 minutes ago."
     assert client.get("/api/where", params={"item": "meds"}).json()["item"] == "medication"
 
 
@@ -97,7 +99,15 @@ def test_guide_only_speaks_on_change(client, jpeg):
 
 def test_guide_unknown_item(client, jpeg):
     r = client.post("/api/guide", files=frame(jpeg), data={"item": "unicorn"}).json()
-    assert r["found"] is False and r["beep_ms"] == 0 and "not watching" in r["say"]
+    assert r["found"] is False and r["beep_ms"] == 0
+    bad = client.post("/api/guide", files=frame(jpeg), data={"item": "   "}).json()
+    assert bad["found"] is False and "which item" in bad["say"]
+
+
+def test_guide_on_demand_custom_item_with_hint(client, jpeg):
+    r = client.post("/api/guide", files=frame(jpeg), data={"item": "my water bottle"},
+                    headers={"X-Mock-Item-X": "0.8"}).json()
+    assert r["found"] is True and r["clock"] == 1 and "Water bottle" in r["say"]
 
 
 def test_guide_item_not_in_watchlist_is_lost(client, jpeg):

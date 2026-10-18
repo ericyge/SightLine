@@ -1,106 +1,32 @@
-"""Vision: the ONLY module that talks to Perceptron. Mock mode (default) needs no key.
+"""Fast live Perceptron client for guidance (PERCEPTRON_MODE=live).
 
-Owner: A. Select the implementation with PERCEPTRON_MODE=mock (default) | live.
-Never log frames, API keys or full responses.
+One SDK `detect` call per frame, built for a live loop: a 2 s timeout, errors mean "not seen", and only
+one call in flight (a frame that arrives while another is running is dropped with VisionBusy, which the
+endpoints answer with 204). It does not assign places, so `localize` never matches. For place-aware
+memory use PERCEPTRON_MODE=perceptron (the full client in vision.py). Never log frames or API keys.
+
+Confirmed from the SDK source (perceptron 0.4.0): image() takes raw bytes; coordinates are integers on
+a normalized 0-1000 grid; detect() sets expects="box" itself (so passing it is accepted but redundant);
+there is no per-call timeout in the high-level helpers, so the timeout is the global
+`configure(timeout=...)`. NOT verified here: accuracy on real scenes.
+TODO(A): spot text ("on the desk, next to the lamp") needs a second call; it is "" for now.
 """
 import logging
 import math
 import os
 import threading
 import time
-import zlib
-from abc import ABC, abstractmethod
 from collections import deque
-from dataclasses import dataclass
 
-log = logging.getLogger("sightline.vision")
+from ..net import use_system_certificates
+from .vision import Detection, LocalizationResult, VisionClient
+
+log = logging.getLogger("sightline.vision.live")
 
 
 class VisionBusy(Exception):
     """A Perceptron call is already in flight; this frame is dropped (the endpoint answers 204)."""
 
-
-@dataclass
-class Detection:
-    """One item found in a frame. box is [x1, y1, x2, y2] normalized 0..1."""
-    item: str
-    box: list[float]
-    confidence: float
-    spot: str = ""
-
-
-class VisionClient(ABC):
-    """Interface used by /observe and /guide."""
-    mock = False
-    mode = "unknown"
-
-    @abstractmethod
-    def detect(self, frame: bytes, items: list[dict], room: str | None = None,
-               hints: dict | None = None) -> list[Detection]:
-        """Find the given watchlist items ({name, description, ...}) in one JPEG frame.
-
-        room is the user-selected room (context for the spot string). hints is only used by
-        MockVision (forced position/size); real clients ignore it. The live client raises
-        VisionBusy when it is already working on another frame, and returns [] ("not seen")
-        for any provider error, so callers never crash on a vision problem.
-        """
-
-    def stats(self) -> dict | None:
-        """Latency numbers for the live client (None for mock). See VisionStats.snapshot()."""
-        return None
-
-
-# ---- mock -------------------------------------------------------------------------------
-
-MOCK_BASE_X = {"wallet": 0.3, "keys": 0.62, "phone": 0.45, "glasses": 0.2, "medication": 0.78}
-MOCK_SPOTS = {
-    "wallet": "on the desk, next to the lamp",
-    "keys": "on the counter, next to the fruit bowl",
-    "phone": "on the table, next to the remote",
-    "glasses": "on the nightstand, next to the book",
-    "medication": "on the shelf, next to the kettle",
-}
-MOCK_BOX_W = 0.10
-MOCK_BOX_H = 0.15
-MOCK_CENTER_Y = 0.6
-
-
-def _triangle(n: int, period: int = 20) -> float:
-    """Deterministic wave in [-1, 1]."""
-    t = n % period
-    half = period / 2
-    return t / (half / 2) - 1 if t < half else 3 - t / (half / 2)
-
-
-class MockVision(VisionClient):
-    """Deterministic fake detections: each item sits near a base x and drifts a little per call."""
-    mock = True
-    mode = "mock"
-
-    def __init__(self) -> None:
-        self._calls = 0
-
-    def detect(self, frame: bytes, items: list[dict], room: str | None = None,
-               hints: dict | None = None) -> list[Detection]:
-        self._calls += 1
-        hints = hints or {}
-        forced_x, forced_h = hints.get("x"), hints.get("h")
-        out = []
-        for it in items:
-            name = it["name"]
-            base = MOCK_BASE_X.get(name, 0.25 + 0.5 * (zlib.crc32(name.encode()) % 100) / 100)
-            x = forced_x if forced_x is not None else base + 0.04 * _triangle(self._calls)
-            x = min(1.0, max(0.0, x))
-            h = forced_h if forced_h is not None else MOCK_BOX_H
-            half_w, half_h = MOCK_BOX_W / 2, h / 2
-            box = [max(0.0, x - half_w), max(0.0, MOCK_CENTER_Y - half_h),
-                   min(1.0, x + half_w), min(1.0, MOCK_CENTER_Y + half_h)]
-            spot = MOCK_SPOTS.get(name, "on the table, next to the lamp")
-            out.append(Detection(name, [round(v, 3) for v in box], 0.9, spot))
-        return out
-
-
-# ---- real -------------------------------------------------------------------------------
 
 class VisionStats:
     """Thread-safe latency window for Perceptron calls. Numbers only: no frames, no responses."""
@@ -177,36 +103,13 @@ def match_class(mention: str | None, classes: list[str]) -> int | None:
     return 0 if len(classes) == 1 else None
 
 
-def use_system_certificates() -> None:
-    """Make the SDK's HTTP client trust the OS certificate store (antivirus/VPN/proxies re-sign HTTPS on
-    many laptops, which breaks Python's bundled certificates). The SDK looks `_http_client` up at call
-    time precisely so it can be replaced. Idempotent, and leaves a test's mock in place."""
-    import httpx
-    from perceptron import client as sdk
-    from .net import VERIFY
-    if getattr(sdk._http_client, "__qualname__", "") != "_http_client":
-        return   # already replaced (by us, or by a test)
-
-    def _system_cert_http_client(timeout):
-        return httpx.Client(timeout=timeout, verify=VERIFY)
-
-    sdk._http_client = _system_cert_http_client
-
-
-class PerceptronVision(VisionClient):
+class DetectVision(VisionClient):
     """Live client (PERCEPTRON_MODE=live). One SDK `detect` call per frame.
 
-    Per frame: classes = each watched item's description (fall back to its name); all items go
-    in ONE call, so observe costs one request per frame. Boxes come back on a 0-1000 grid and are
-    converted to 0..1. Only one call runs at a time: a frame that arrives while another is in
-    flight raises VisionBusy and is dropped (no queue). Errors, timeouts and 429s return [].
-
-    Confirmed from the SDK source (perceptron 0.4.0): image() takes raw bytes; detect() sets
-    expects="box" itself (so passing expects="box" is accepted but redundant); there is no per-call
-    timeout in the high-level helpers, so the timeout is the global `configure(timeout=...)`.
-    NOT verified: latency, and whether your key can use the chosen model.
-    TODO(A): spot text ("on the desk, next to the lamp") needs a second call; it is "" for now.
-    TODO(A): in-context example photos per item (detect(examples=...)).
+    Per frame: classes = each watched item's description (fall back to its name); all items go in ONE
+    call, so observe costs one request per frame. Boxes come back on a 0-1000 grid and are converted
+    to 0..1. Only one call runs at a time: a frame that arrives while another is in flight raises
+    VisionBusy and is dropped (no queue). Errors, timeouts and 429s return [].
     """
     mode = "live"
 
@@ -226,6 +129,10 @@ class PerceptronVision(VisionClient):
 
     def stats(self) -> dict:
         return self._stats.snapshot()
+
+    def localize(self, frame: bytes, places: list[dict], hints: dict | None = None) -> LocalizationResult:
+        """Live detect mode does not recognize places (use PERCEPTRON_MODE=perceptron for that)."""
+        return LocalizationResult(place_id=None, reason="live detect mode does not localize")
 
     def _sdk_boxes(self, frame: bytes, classes: list[str]) -> list:
         """The raw SDK boxes (0-1000 grid) for one JPEG frame."""
@@ -281,25 +188,3 @@ class PerceptronVision(VisionClient):
                 continue
             found[idx] = Detection(items[idx]["name"], box, UNKNOWN_CONFIDENCE, "")
         return [found[i] for i in sorted(found)]
-
-
-# ---- factory ----------------------------------------------------------------------------
-
-_client: VisionClient | None = None
-
-
-def get_vision() -> VisionClient:
-    """Process-wide vision client chosen by PERCEPTRON_MODE (default: mock; "live" = real Perceptron)."""
-    global _client
-    if _client is None:
-        mode = os.getenv("PERCEPTRON_MODE", "mock").lower()
-        _client = PerceptronVision() if mode in ("live", "perceptron") else MockVision()
-        if _client.mock:
-            log.warning("*** MOCK VISION ACTIVE: detections are fake (PERCEPTRON_MODE=mock) ***")
-    return _client
-
-
-def reset_vision() -> None:
-    """Drop the cached client (tests, or after changing env)."""
-    global _client
-    _client = None
