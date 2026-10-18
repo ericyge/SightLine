@@ -67,10 +67,10 @@ export class Api {
     }
   }
 
-  health = () => this.send<Health>('/api/health', {}, 4000);
-  profile = () => this.send<Profile>('/api/profile', {}, 4000);
-  calibration = () => this.send<CalibrationStatus>('/api/calibration');
-  startCalibration = () => this.send<CalibrationStatus>('/api/calibration/start', { method: 'POST' });
+  health = () => this.send<Health>('/api/health', {}, 10000);
+  profile = () => this.send<Profile>('/api/profile', {}, 10000);
+  calibration = () => this.send<CalibrationStatus>('/api/calibration', {}, 10000);
+  startCalibration = () => this.send<CalibrationStatus>('/api/calibration/start', { method: 'POST' }, 15000);
 
   finishCalibration(sessionId: string) {
     return this.send<CalibrationStatus>('/api/calibration/finish', {

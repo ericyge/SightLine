@@ -189,6 +189,12 @@ class MockVision(VisionClient):
                    min(1.0, x + half_w), min(1.0, MOCK_CENTER_Y + half_h)]
             spot = MOCK_SPOTS.get(name, "on the table, next to the lamp")
             out.append(Detection(name, [round(v, 3) for v in box], 0.9, spot))
+        if "hand_x" in hints or "hand_y" in hints:
+            hx = min(1.0, max(0.0, float(hints.get("hand_x", 0.5))))
+            hy = min(1.0, max(0.0, float(hints.get("hand_y", MOCK_CENTER_Y))))
+            hbox = [max(0.0, hx - 0.06), max(0.0, hy - 0.08),
+                    min(1.0, hx + 0.06), min(1.0, hy + 0.08)]
+            out.append(Detection("hand", [round(v, 3) for v in hbox], 0.9, ""))
         return out
 
     def localize(self, frame: bytes, places: list[dict],
@@ -278,6 +284,13 @@ class _Label(BaseModel):
 class _Labels(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     detections: list[_Label] = Field(max_length=50)
+    hand_box: list[Coordinate] | None = Field(default=None, min_length=4, max_length=4)
+
+    @model_validator(mode="after")
+    def ordered_hand_box(self):
+        if self.hand_box is not None and (self.hand_box[0] >= self.hand_box[2] or self.hand_box[1] >= self.hand_box[3]):
+            self.hand_box = None
+        return self
 
 
 class _LocatedLabel(_Label):
@@ -298,7 +311,7 @@ Use exact watchlist names and at most one detection per item; omit indistinguish
 Return tight boxes [left, top, right, bottom] in the current image's 0..1000 coordinate grid.
 For memory, give a short spot relative to visible surfaces/landmarks, e.g. 'on the desk beside
 the lamp'. Do not invent landmarks, infer a room, or substitute an item's usual home location.
-For guidance, leave spot empty. Return {"detections": []} when no requested item is visible.
+For guidance, leave spot empty, and if a person's reaching hand, fingers, or palm is visible in the frame, return its tight [left, top, right, bottom] box in hand_box, else null. Return {"detections": [], "hand_box": null} when no requested item is visible.
 Return only the requested JSON. Do not provide confidence estimates."""
 
 
@@ -592,6 +605,8 @@ class PerceptronVision(VisionClient):
         schema = result_model.model_json_schema()
         if not located:
             schema["$defs"]["_Label"]["properties"]["item"]["enum"] = sorted(names)
+            if "hand_box" in schema.get("properties", {}) and "hand_box" not in schema.get("required", []):
+                schema.setdefault("required", []).append("hand_box")
         content = []
         for name in sorted(names):
             for photo in self._references.get(name, []):
@@ -618,7 +633,8 @@ class PerceptronVision(VisionClient):
         if not reply.complete or reply.finish_reason != "stop" or not reply.text:
             raise VisionUnavailable("Perceptron returned an incomplete response; try another frame.")
         try:
-            labels = result_model.model_validate_json(reply.text).detections
+            parsed = result_model.model_validate_json(reply.text)
+            labels = parsed.detections
         except ValidationError:
             raise VisionUnavailable("Perceptron returned invalid labels; this frame was not saved.") from None
         seen = set()
@@ -647,6 +663,8 @@ class PerceptronVision(VisionClient):
                 else:
                     shared_locations[group_key] = loc
             out.append(Detection(item_name, [n / 1000 for n in label.box], None, label.spot.strip(), loc))
+        if not located and room is None and getattr(parsed, "hand_box", None) is not None and "hand" not in seen:
+            out.append(Detection("hand", [n / 1000 for n in parsed.hand_box], None, "", None))
         return out
 
 

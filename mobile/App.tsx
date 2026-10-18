@@ -25,18 +25,11 @@ export default function App() {
     return () => subscription.remove();
   }, [refreshPermission]);
 
-  async function enableCamera() {
-    setError('');
-    try {
-      if (permission?.canAskAgain === false) {
-        await Linking.openSettings();
-      } else {
-        await requestPermission();
-      }
-    } catch {
-      setError('Could not open camera permissions. Please try again.');
+  useEffect(() => {
+    if (permission && !permission.granted && permission.canAskAgain !== false) {
+      void requestPermission();
     }
-  }
+  }, [permission, requestPermission]);
 
   const granted = permission?.granted;
   const blocked = permission?.canAskAgain === false;
@@ -60,28 +53,6 @@ export default function App() {
         />
       )}
       {granted && active && !error && <Controls cameraRef={cameraRef} cameraReady={cameraReady} onRestartCamera={restartCamera} />}
-      {(!granted || error) && (
-        <View style={styles.message}>
-          <Text style={styles.title} accessibilityRole="header">Sightline</Text>
-          <Text style={styles.text} accessibilityLiveRegion="polite">
-            {error || (!permission
-              ? 'Checking camera permission…'
-              : blocked
-                ? 'Enable camera access in Settings to show the camera.'
-                : 'Allow camera access to show the camera preview.')}
-          </Text>
-          {permission && (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={granted ? 'Retry camera' : blocked ? 'Open camera settings' : 'Allow camera access'}
-              style={({ pressed }) => [styles.button, pressed && styles.pressed]}
-              onPress={granted ? () => { setError(''); setCameraReady(false); setCameraKey((key) => key + 1); } : enableCamera}
-            >
-              <Text style={styles.buttonText}>{granted ? 'Try again' : blocked ? 'Open Settings' : 'Allow camera'}</Text>
-            </Pressable>
-          )}
-        </View>
-      )}
     </View>
   );
 }

@@ -129,6 +129,51 @@ class GuideState:
     last_key: str | None = None
     last_spoken_at: float = 0.0
     touched: float = 0.0
+    last_box: list[float] | None = None
+    last_hand_dist: float | None = None
+    last_target_err: float | None = None
+    last_beep_ms: int | None = None
+
+
+def hand_distance(box: list[float], hand_box: list[float]) -> float:
+    """Normalized 2D distance (0..1.4) between the target object box and a reaching hand box.
+
+    Combines edge-to-edge gap (0 when the hand overlaps/touches the object) with center-to-center
+    distance so movement remains smooth even after the hand reaches the object's boundary.
+    """
+    cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    hx, hy = (hand_box[0] + hand_box[2]) / 2, (hand_box[1] + hand_box[3]) / 2
+    center_d = math.hypot(cx - hx, cy - hy)
+    gx = max(0.0, hand_box[0] - box[2], box[0] - hand_box[2])
+    gy = max(0.0, hand_box[1] - box[3], box[1] - hand_box[3])
+    gap_d = math.hypot(gx, gy)
+    return round(0.65 * gap_d + 0.35 * center_d, 4)
+
+
+def hand_beep_ms(dist: float, prev_dist: float | None = None,
+                 prev_beep_ms: int | None = None) -> tuple[int, str]:
+    """Beep interval (ms) and motion ('right_way'|'wrong_way'|'steady') for hand/close-range guidance.
+
+    Moving in the right way (dist decreasing) increases beep frequency (smaller beep_ms).
+    Moving in the wrong way (dist increasing) decreases beep frequency (larger beep_ms).
+    """
+    clamped = min(1.0, max(0.0, dist))
+    base = 80.0 + 620.0 * clamped
+    if prev_dist is not None:
+        delta = dist - prev_dist
+        if delta < -0.006:
+            factor = max(0.72, 0.88 + delta * 0.6)
+            ms = round(base * factor)
+            if prev_beep_ms is not None:
+                ms = min(ms, max(65, prev_beep_ms - 15))
+            return max(65, min(280, ms)), "right_way"
+        if delta > 0.006:
+            factor = min(2.1, 1.32 + delta * 1.4)
+            ms = round(base * factor)
+            if prev_beep_ms is not None:
+                ms = max(ms, min(900, prev_beep_ms + 40))
+            return max(300, min(900, ms)), "wrong_way"
+    return max(75, min(680, round(base))), "steady"
 
 
 @dataclass
@@ -159,25 +204,59 @@ def navigate_say(
 
 
 def compute_guide(item: str, box: list[float] | None, state: GuideState, style: str,
-                  fov_h: float, now: float, yaw: float | None = None) -> dict:
+                  fov_h: float, now: float, yaw: float | None = None,
+                  hand_box: list[float] | None = None, *, dynamic: bool = False) -> dict:
     """One guidance step from a detection (box or None) to a GuideResponse-shaped dict.
 
     yaw is the phone's current heading in degrees (optional). It lets the "lost" cue point the shorter way.
+    When hand_box is present (or dynamic=True in close range), beep_ms increases in frequency when the
+    user's hand/phone moves toward the object and decreases in frequency when moving away.
     """
     state.touched = now
     if box is None:
         turn = turn_direction(state.last_angle, state.yaw_at_last, yaw)
         text, state.last_key = say(item, None, None, None, style, found=False,
                                    lost_s=now - state.since, last_key=state.last_key, turn=turn)
+        state.last_hand_dist = None
+        state.last_target_err = None
+        state.last_beep_ms = None
         return {"found": False, "point": None, "box": None, "angle": None, "clock": None,
                 "distance": None, "pan": 0.0, "say": text, "beep_ms": 0}
     cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    recent = state.last_angle is not None and now - state.since <= SMOOTH_WINDOW_S
     angle = angle_deg(cx, fov_h)
-    if state.last_angle is not None and now - state.since <= SMOOTH_WINDOW_S:
+    if hand_box is not None:
+        hx = (hand_box[0] + hand_box[2]) / 2
+        # Blend camera-relative angle with hand-to-object vector so stereo pan guides the hand toward the object.
+        hand_rel_angle = (cx - hx) * fov_h
+        angle = 0.55 * hand_rel_angle + 0.45 * angle
+    if recent:
         angle = smooth(state.last_angle, angle)
-    state.last_angle, state.since, state.yaw_at_last = angle, now, yaw
+    state.last_angle, state.since, state.yaw_at_last, state.last_box = angle, now, yaw, box
     clock, dist = clock_hour(angle), distance_bucket(box, cy)
     text, state.last_key = say(item, angle, clock, dist, style, last_key=state.last_key)
+
+    b_ms = beep_ms(dist)
+    if hand_box is not None:
+        hdist = hand_distance(box, hand_box)
+        b_ms, _ = hand_beep_ms(hdist, state.last_hand_dist if recent else None,
+                               state.last_beep_ms if recent else None)
+        state.last_hand_dist = hdist
+        state.last_beep_ms = b_ms
+        if hdist <= 0.25:
+            dist = "reach"
+    elif dynamic and dist in ("near", "reach"):
+        h = round(box[3] - box[1], 4)
+        err = round(0.55 * min(1.0, abs(angle) / 32.5) + 0.45 * max(0.0, (0.42 - h) / 0.35), 4)
+        if recent and state.last_target_err is not None:
+            b_ms, _ = hand_beep_ms(err, state.last_target_err, state.last_beep_ms)
+        state.last_target_err = err
+        state.last_beep_ms = b_ms
+    else:
+        state.last_hand_dist = None
+        state.last_target_err = None
+        state.last_beep_ms = b_ms
+
     return {"found": True, "point": [round(cx, 3), round(cy, 3)], "box": box,
             "angle": round(angle, 1), "clock": clock, "distance": dist,
-            "pan": round(pan(angle), 2), "say": text, "beep_ms": beep_ms(dist)}
+            "pan": round(pan(angle), 2), "say": text, "beep_ms": b_ms}

@@ -117,7 +117,8 @@ def _parse_ts(ts: str) -> datetime:
 def _mock_hints(request: Request) -> dict:
     """Forced mock position/size/place from headers or query params (mock mode only)."""
     hints = {}
-    for key, header in (("x", "x-mock-item-x"), ("h", "x-mock-item-h")):
+    for key, header in (("x", "x-mock-item-x"), ("h", "x-mock-item-h"),
+                        ("hand_x", "x-mock-hand-x"), ("hand_y", "x-mock-hand-y")):
         raw = request.headers.get(header) or request.query_params.get(f"mock_{key}")
         try:
             if raw is not None:
@@ -456,8 +457,8 @@ async def calibration_frame(request: Request, frame: UploadFile = File(...),
     return result
 
 @app.get("/api/health", response_model=HealthResponse)
-def health():
-    """Mode check so the UI can show a MOCK badge."""
+async def health():
+    """Mode check so the UI can show a MOCK badge. async so a busy Perceptron pool cannot starve it."""
     v = get_vision()
     client = stt.get_stt()
     return HealthResponse(mode=v.mode, mock=v.mock, stt=client.provider if client else "browser",
@@ -467,8 +468,8 @@ def health():
 
 
 @app.get("/api/profile", response_model=Profile)
-def get_profile():
-    return db.get_profile()
+async def get_profile():
+    return await run_in_threadpool(db.get_profile)
 
 
 @app.post("/api/profile", response_model=OkResponse)
@@ -564,7 +565,14 @@ async def guide(request: Request, frame: UploadFile = File(...), item: str = For
         except VisionBusy:
             return Response(status_code=204)   # drop; the client keeps its last result and the local beeps
     box = next((d.box for d in detections if (db.canonicalize_item(d.item) or d.item) == name), None)
+    hand_box = next((d.box for d in detections if d.item == "hand"), None)
     now = time.monotonic()
+    prev_state = _guide_states.get(name)
+    # If the user's hand is visible and just occluded the target object that was seen moments ago,
+    # keep the last object box so close-range hand beeping continues smoothly instead of dropping out.
+    if box is None and hand_box is not None and prev_state is not None and prev_state.last_box is not None:
+        if now - prev_state.since <= guidance.SMOOTH_WINDOW_S:
+            box = prev_state.last_box
     if box is None:
         result = await run_in_threadpool(_navigate_guide, name, data, hints, now, yaw_deg, loc_future)
     else:
@@ -577,18 +585,22 @@ async def guide(request: Request, frame: UploadFile = File(...), item: str = For
         prev_vis_key = state.last_key
         # yaw_deg (the phone's heading) is remembered so a later "Lost it" cue can point the shorter way;
         # beep panning between updates is still compensated in the apps.
-        result = guidance.compute_guide(name, box, state, db.guidance_style(), fov_h(), now, yaw_deg)
+        result = guidance.compute_guide(name, box, state, db.guidance_style(), fov_h(), now, yaw_deg,
+                                        hand_box=hand_box, dynamic=real_live)
         if not vision.mock and not hints:
             cue = _body_relative_visual_cue(result.get("angle"), result.get("distance"))
             vis_key = f"vis:{cue}"
-            is_new_reach = result.get("distance") == "reach" and prev_vis_key != vis_key
-            if not is_new_reach and state.last_spoken_at > 0 and (now - state.last_spoken_at) < LIVE_MIN_CUE_GAP_S:
+            is_new_reach = result.get("distance") == "reach" and not (prev_vis_key or "").startswith("vis:Stop. Reach")
+            # While the hand is actively in frame or already in reach, let the hot/cold beeps own the
+            # speaker instead of interrupting with frequent voice cues.
+            min_gap = 16.0 if (hand_box is not None or (prev_vis_key or "").startswith("vis:Stop. Reach")) else LIVE_MIN_CUE_GAP_S
+            if not is_new_reach and state.last_spoken_at > 0 and (now - state.last_spoken_at) < min_gap:
                 spoken = ""
                 state.last_key = prev_vis_key
             else:
                 spoken, state.last_key, state.last_spoken_at = guidance.navigate_say(
                     cue, vis_key, prev_vis_key, now=now,
-                    last_spoken_at=state.last_spoken_at, repeat_s=LIVE_REPEAT_S)
+                    last_spoken_at=state.last_spoken_at, repeat_s=max(LIVE_REPEAT_S, min_gap))
             result["say"] = spoken
         destination = memory.navigable_destination(name)
         result = {**result, "mode": "visual", "current_place": None,

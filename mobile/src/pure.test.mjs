@@ -5,7 +5,7 @@ import { Endpointer, encodeWav16k, levelDb, parseWakeMessage, PcmConverter, stre
 import { CameraWatchdog, SingleFlight, withTimeout } from './capture.ts';
 import { calibrationCommand, observationFields, observationSession, prepareLearningReply } from './calibration.ts';
 import { describeFirstFailure, describeLast, emptyStats, errorText, record, StageError, summarize } from './frameStats.ts';
-import { angleDiff, cameraHeading, compensate, panFromAngle, pitchBoost } from './guidance.ts';
+import { angleDiff, cameraHeading, compensate, modulateBeep, panFromAngle, pitchBoost } from './guidance.ts';
 import { guideIntervalMs, waitMs } from './pacing.ts';
 import { createVoice, CUE_CACHED_TIMEOUT_MS, CUE_FETCH_TIMEOUT_MS, REPLY_TIMEOUT_MS } from './voiceCore.ts';
 import { makeBeepWav } from './wav.ts';
@@ -102,6 +102,18 @@ test('cameraHeading: upright phone facing north is 0, turning left decreases it'
   assert.ok(Math.abs(cameraHeading(0, rad(90), 0)) < 1e-9);
   assert.ok(Math.abs(cameraHeading(rad(90), rad(90), 0) - 270) < 1e-6);   // turned left 90 deg
   assert.ok(Math.abs(cameraHeading(rad(-90), rad(90), 0) - 90) < 1e-6);   // turned right 90 deg
+});
+
+test('modulateBeep: increases frequency when moving the right way and decreases when moving the wrong way', () => {
+  const steady = modulateBeep(250, 12, 12, 250, 'near');
+  const rightWay = modulateBeep(180, 4, 12, 250, 'reach');
+  const wrongWay = modulateBeep(380, 22, 12, 250, 'near');
+  assert.equal(rightWay.direction, 'right_way');
+  assert.equal(wrongWay.direction, 'wrong_way');
+  assert.ok(rightWay.intervalMs < steady.intervalMs);
+  assert.ok(wrongWay.intervalMs > steady.intervalMs);
+  assert.equal(rightWay.pitch, 'high');
+  assert.equal(wrongWay.pitch, 'low');
 });
 
 test('guide pacing: 3 fps default, clamped, never negative', () => {

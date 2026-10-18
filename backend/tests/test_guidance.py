@@ -202,3 +202,26 @@ def test_compute_guide_remembers_the_heading_of_the_last_sighting():
     assert state.yaw_at_last == 123.0
     g.compute_guide("wallet", [0.4, 0.5, 0.5, 0.65], state, "clock_face", 65, now=1.2)
     assert state.yaw_at_last is None                             # an update without a heading clears the old one
+
+
+def test_hand_beep_frequency_increases_right_way_and_decreases_wrong_way():
+    state = g.GuideState(since=0.0)
+    wallet_box = [0.45, 0.50, 0.55, 0.65]
+    # 1. Hand starts moderately far from the wallet
+    r1 = g.compute_guide("wallet", wallet_box, state, "left_right", 65, now=1.0,
+                         hand_box=[0.10, 0.50, 0.22, 0.66])
+    # 2. Hand moves closer to the wallet (right way) -> beep frequency increases (beep_ms decreases)
+    r2 = g.compute_guide("wallet", wallet_box, state, "left_right", 65, now=1.4,
+                         hand_box=[0.28, 0.50, 0.40, 0.66])
+    assert r2["beep_ms"] < r1["beep_ms"]
+    # 3. Hand moves right next to / touching the wallet (right way) -> beep frequency increases further
+    r3 = g.compute_guide("wallet", wallet_box, state, "left_right", 65, now=1.8,
+                         hand_box=[0.42, 0.50, 0.52, 0.66])
+    assert r3["beep_ms"] < r2["beep_ms"]
+    assert r3["distance"] == "reach"
+    # 4. Hand moves away from the wallet (wrong way) -> beep frequency decreases (beep_ms increases)
+    r4 = g.compute_guide("wallet", wallet_box, state, "left_right", 65, now=2.2,
+                         hand_box=[0.12, 0.50, 0.24, 0.66])
+    assert r4["beep_ms"] > r2["beep_ms"]
+    assert r4["beep_ms"] >= 300
+

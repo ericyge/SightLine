@@ -15,7 +15,7 @@ import { CameraWatchdog, SingleFlight } from './capture';
 import {
   describeFirstFailure, describeLast, emptyStats, errorText, type LoopStats, record, type Result, StageError, summarize,
 } from './frameStats';
-import { compensate, panFromAngle, pitchBoost } from './guidance';
+import { compensate, modulateBeep, panFromAngle } from './guidance';
 import { getYaw, startOrientation, stopOrientation } from './orientation';
 import { loadServer, saveServer } from './serverStore';
 import { configureVoice, isVoicePlaying, releaseVoice, voice } from './voice';
@@ -27,7 +27,7 @@ const LOOP_MS = 1000;
 const STALE_MS = 3000;       // silence beeps if the last guide response is older than this
 const HISTORY_TURNS = 6;     // matches the backend limit
 const MIN_HOLD_MS = 300;     // shorter presses are treated as accidental taps
-const DEFAULT_SERVER = process.env.EXPO_PUBLIC_API_BASE ?? '';
+const DEFAULT_SERVER = process.env.EXPO_PUBLIC_API_BASE || 'http://10.18.202.190:8000';
 // Expo says to wait for the camera's onCameraReady before taking a photo. If it never fires, try anyway
 // after this long and show whatever error comes back in the debug counter.
 const CAMERA_WAIT_MS = 4000;
@@ -60,6 +60,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   const [wakeOn, setWakeOn] = useState(true);                   // the user's switch
   const [wakeBusy, setWakeBusy] = useState(false);              // handling a wake request, or its reply is playing
   const [speechBusy, setSpeechBusy] = useState(false);          // TTS/spoken cue playing (wake must yield the mic)
+  const [beepingActive, setBeepingActive] = useState(false);    // visual/hand beeps playing (wake must yield the mic on iOS)
   const speechHoldRef = useRef(0);                              // >0 while a reply or guidance cue is actively speaking
   const hushBeeps = useRef(false);                              // true while wake or speech owns the audio session
   const [rooms, setRooms] = useState<string[]>(['bedroom', 'kitchen', 'living room']);
@@ -130,45 +131,83 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   useEffect(() => {
     if (!server) return;
     let cancelled = false;
+    let announcedFail = false;
     (async () => {
-      try {
-        const [health, profile, savedCalibration] = await Promise.all([api.health(), api.profile(), api.calibration()]);
-        if (cancelled) return;
-        const restored = savedCalibration.available
-          ? await api.startCalibration() : savedCalibration;
-        if (cancelled) return;
-        setConnected(true);
-        saveServer(server);   // remember it for the next reload
-        setMock(health.mock);
-        setStt(health.stt);
-        setWakeAvailable(Boolean(health.wake));
-        configureVoice(api, health);   // ElevenLabs voice on/off and the guidance-cue setting
-        guideMs.current = guideIntervalMs(health.guide_max_fps);
-        setRooms(profile.rooms);
-        setRoom((r) => (profile.rooms.includes(r) ? r : ''));
-        calibrationRef.current = restored;
-        calibrationSequence.current = restored.last_sequence;
-        setCalibration(restored);
-        // Blind-first: announce readiness out loud. Screen text is for helpers only.
-        const wakeReady = health.stt === 'elevenlabs' && Boolean(health.wake);
-        let readySay: string;
-        if (restored.status === 'mapping' && wakeReady) {
-          readySay = 'Connected. I am learning your space. Say Hey Jarvis, then ask about an object.';
-        } else if (restored.status === 'mapping') {
-          readySay = 'Connected and learning, but Hey Jarvis is not available. Check the speech and wake settings on the server.';
-        } else if (wakeReady) {
-          readySay = 'Connected. Apartment learning needs full Perceptron mode. Say Hey Jarvis when you are ready.';
-        } else {
-          readySay = 'Connected, but voice control is not ready. Check speech and wake settings on the server.';
+      // Retry through Wi-Fi blips / uvicorn restarts so the user does not need to press r.
+      for (let tries = 0; !cancelled; tries++) {
+        try {
+          const [health, profile, savedCalibration] = await Promise.all([
+            api.health(), api.profile(), api.calibration(),
+          ]);
+          if (cancelled) return;
+          let restored = savedCalibration;
+          if (savedCalibration.available) {
+            try {
+              restored = await api.startCalibration();
+            } catch (e) {
+              // Reachability already proved; keep going and report the learning error separately.
+              if (cancelled) return;
+              setConnected(true);
+              saveServer(server);
+              setMock(health.mock);
+              setStt(health.stt);
+              setWakeAvailable(Boolean(health.wake));
+              configureVoice(api, health);
+              guideMs.current = guideIntervalMs(health.guide_max_fps);
+              setRooms(profile.rooms);
+              setRoom((r) => (profile.rooms.includes(r) ? r : ''));
+              calibrationRef.current = savedCalibration;
+              calibrationSequence.current = savedCalibration.last_sequence;
+              setCalibration(savedCalibration);
+              const warn = `Connected, but apartment learning could not start: ${errorText(e)}`;
+              setStatus(warn);
+              void voice.reply(warn);
+              return;
+            }
+          }
+          if (cancelled) return;
+          setConnected(true);
+          saveServer(server);   // remember it for the next reload
+          setMock(health.mock);
+          setStt(health.stt);
+          setWakeAvailable(Boolean(health.wake));
+          configureVoice(api, health);   // ElevenLabs voice on/off and the guidance-cue setting
+          guideMs.current = guideIntervalMs(health.guide_max_fps);
+          setRooms(profile.rooms);
+          setRoom((r) => (profile.rooms.includes(r) ? r : ''));
+          calibrationRef.current = restored;
+          calibrationSequence.current = restored.last_sequence;
+          setCalibration(restored);
+          // Blind-first: announce readiness out loud. Screen text is for helpers only.
+          const wakeReady = health.stt === 'elevenlabs' && Boolean(health.wake);
+          let readySay: string;
+          if (restored.status === 'mapping' && wakeReady) {
+            readySay = 'Connected. I am learning your space. Say Hey Jarvis, then ask about an object.';
+          } else if (restored.status === 'mapping') {
+            readySay = 'Connected and learning, but Hey Jarvis is not available. Check the speech and wake settings on the server.';
+          } else if (wakeReady) {
+            readySay = 'Connected. Apartment learning needs full Perceptron mode. Say Hey Jarvis when you are ready.';
+          } else {
+            readySay = 'Connected, but voice control is not ready. Check speech and wake settings on the server.';
+          }
+          setStatus(readySay);
+          void voice.reply(readySay);
+          return;
+        } catch (e) {
+          if (cancelled) return;
+          setConnected(false);
+          const detail = errorText(e);
+          const fail = tries === 0
+            ? `Cannot reach the server yet. Retrying. ${detail}`
+            : `Still trying to reach the server. ${detail}`;
+          setStatus(fail);
+          // Speak only once so retries do not stack voice prompts.
+          if (!announcedFail) {
+            announcedFail = true;
+            void voice.reply('Cannot reach the server. I will keep trying.');
+          }
+          await sleep(Math.min(8000, 1500 + tries * 1000));
         }
-        setStatus(readySay);
-        void voice.reply(readySay);
-      } catch {
-        if (cancelled) return;
-        setConnected(false);
-        const fail = 'Cannot reach the server. Check that the phone and laptop are on the same Wi-Fi, and that the backend is running.';
-        setStatus(fail);
-        void voice.reply(fail);
       }
     })();
     return () => { cancelled = true; };
@@ -305,15 +344,17 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
 
   // ---- "Hey Jarvis": primary hands-free path (blind-first; hold-to-talk is backup only) ----
   // iOS: AudioStream forces record-only mode while active. Yield the mic whenever TTS speech
-  // (`speechBusy`), a wake utterance (`wakeBusy`), or push-to-talk (`listening`) is active, and
-  // immediately re-arm "Hey Jarvis" in between guidance cues so the user can say
-  // "Hey Jarvis, I got the wallet" or "Hey Jarvis, stop" hands-free.
+  // (`speechBusy`), close-range/hand beeping (`beepingActive`), a wake utterance (`wakeBusy`),
+  // or push-to-talk (`listening`) is active, and immediately re-arm "Hey Jarvis" when silent.
   const wakeEnabled = (wakeAvailable && wakeOn && connected && stt === 'elevenlabs'
-    && !listening && !wakeBusy && !speechBusy);
+    && !listening && !wakeBusy && !speechBusy && !beepingActive);
   // Beep loop and guidance cue queue read these refs so speech/wake state toggles do not
   // remount the guidance effect or interrupt an active "Hey Jarvis, I got the [object]" capture.
   const wakeEnabledRef = useRef(wakeEnabled);
   useEffect(() => { wakeEnabledRef.current = wakeEnabled; }, [wakeEnabled]);
+  const beepingActiveRef = useRef(beepingActive);
+  useEffect(() => { beepingActiveRef.current = beepingActive; }, [beepingActive]);
+  const prevServerBeepMsRef = useRef<number | null>(null);
   const voiceCaptureActiveRef = useRef(false);
 
   // Guidance: as fast as the backend answers, capped (GUIDE_MAX_FPS), one request in flight and never
@@ -374,6 +415,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
           if (cancelled) break;
           // null = 204: the backend dropped this frame (still busy). Keep the last result.
           if (r && !voiceCaptureActiveRef.current) {
+            prevServerBeepMsRef.current = guideRef.current.last?.found ? guideRef.current.last.beep_ms : null;
             guideRef.current = { last: r, yawAtLast: yaw, at: Date.now() };
             const spoken = r.say || (guidanceFailed ? r.next_instruction || 'Camera updates have resumed.' : '');
             if (spoken) {
@@ -403,27 +445,84 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
       }
     })();
     (async () => {
+      let prevBeepAngle: number | null = null;
+      let lastAudioModeRefresh = 0;
+      let steadyReachSince = 0;
+      let listenWindowUntil = 0;
       while (!cancelled) {
-        // Hands-free wake owns the mic on iOS (record-only). Only play spatial beeps while TTS
-        // is active (`speechBusy`) or when wake listening is turned off (`!wakeEnabled`);
-        // otherwise `playBeep` and `AudioStream` fight over AVAudioSession (OSStatus 561017449)
-        // and kill the "Hey Jarvis" microphone stream.
         const { last, yawAtLast, at } = guideRef.current;
-        if (hushBeeps.current || wakeEnabledRef.current || last?.distance === 'reach') { await sleep(100); continue; }
-        if (last?.found && last.angle != null && Date.now() - at < STALE_MS) {
-          // Between vision updates, keep the pan right as the phone turns.
-          const angle = compensate(last.angle, getYaw(), yawAtLast);
-          playBeep(panFromAngle(angle), pitchBoost(angle));
-          await sleep(last.beep_ms);
-        } else {
+        const nowMs = Date.now();
+        const visible = Boolean(last?.found && last.angle != null && last.beep_ms > 0 && nowMs - at < STALE_MS);
+        if (!visible || voiceCaptureActiveRef.current) {
+          if (beepingActiveRef.current) {
+            beepingActiveRef.current = false;
+            setBeepingActive(false);
+          }
+          prevBeepAngle = null;
+          steadyReachSince = 0;
           await sleep(100);
+          continue;
         }
+        const angle = compensate(last!.angle!, getYaw(), yawAtLast);
+        const angleMoved = prevBeepAngle != null && Math.abs(angle - prevBeepAngle) >= 2.0;
+        const serverMoved = prevServerBeepMsRef.current != null && Math.abs(last!.beep_ms - prevServerBeepMsRef.current) > 12;
+        if (angleMoved || serverMoved) {
+          steadyReachSince = 0;
+          listenWindowUntil = 0;
+        } else if (last!.distance === 'reach') {
+          if (steadyReachSince === 0) steadyReachSince = nowMs;
+          else if (nowMs - steadyReachSince > 6500 && listenWindowUntil === 0) {
+            // Brief listening window after 6.5s of stationary reach so "Hey Jarvis, I got the wallet"
+            // can also be spoken while the camera still points at the surface.
+            listenWindowUntil = nowMs + 4500;
+            steadyReachSince = nowMs + 4500;
+          }
+        } else {
+          steadyReachSince = 0;
+        }
+        if (listenWindowUntil > nowMs) {
+          if (beepingActiveRef.current) {
+            beepingActiveRef.current = false;
+            setBeepingActive(false);
+          }
+          await sleep(100);
+          continue;
+        }
+        if (!beepingActiveRef.current) {
+          beepingActiveRef.current = true;
+          setBeepingActive(true);
+          // Let useWake stop AudioStream and switch AVAudioSession from .record to .playback.
+          await sleep(140);
+          void setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false }).catch(() => {});
+          continue;
+        }
+        if (hushBeeps.current) {
+          await sleep(80);
+          continue;
+        }
+        if (nowMs - lastAudioModeRefresh > 1500) {
+          lastAudioModeRefresh = nowMs;
+          void setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false }).catch(() => {});
+        }
+        const { intervalMs, pitch } = modulateBeep(
+          last!.beep_ms,
+          angle,
+          prevBeepAngle,
+          prevServerBeepMsRef.current,
+          last!.distance,
+        );
+        prevBeepAngle = angle;
+        playBeep(panFromAngle(angle), pitch);
+        await sleep(intervalMs);
       }
     })();
     return () => {
       cancelled = true;
       queuedCueText = '';
       guideRef.current = { last: null, yawAtLast: null, at: 0 };
+      prevServerBeepMsRef.current = null;
+      beepingActiveRef.current = false;
+      setBeepingActive(false);
       // Drop any cue hold so stopping guidance always re-arms Hey Jarvis.
       speechHoldRef.current = 0;
       setSpeechBusy(false);
@@ -625,11 +724,8 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
 
   useEffect(() => {
     voiceCaptureActiveRef.current = wakeBusy || listening || commandBusy || wake.state === 'capturing';
-    // Hush beeps while capturing a command, while TTS owns the speaker, or when the item is in
-    // reach ("Stop. Reach straight in front of you now") so the mic stays open in record mode for
-    // "Hey Jarvis, I got the wallet" without playBeep fighting AVAudioSession.
-    const reached = guideRef.current.last?.distance === 'reach';
-    hushBeeps.current = speechBusy || wakeBusy || listening || wake.state === 'capturing' || reached;
+    // Hush beeps only while capturing a voice command or while TTS is actively speaking.
+    hushBeeps.current = speechBusy || wakeBusy || listening || wake.state === 'capturing';
   }, [speechBusy, wakeBusy, listening, commandBusy, wake.state]);
 
   const wakeLine = ((): { text: string; bad: boolean } => {
@@ -638,6 +734,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     if (!wakeOn) return { text: 'off — tap Hey Jarvis: ON', bad: true };
     if (!connected) return { text: 'waiting for the backend', bad: false };
     if (speechBusy) return { text: 'paused while speaking (will resume)', bad: false };
+    if (beepingActive) return { text: 'paused while proximity beeps play (will resume)', bad: false };
     if (listening || wakeBusy) return { text: 'paused while handling a request', bad: false };
     if (wake.state === 'error') return { text: wake.detail || 'error', bad: true };
     if (wake.state === 'capturing') return { text: `heard you, capturing your request (${wake.level} dB)`, bad: false };
@@ -724,149 +821,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     return idle > 3 ? { text: `STOPPED (last tick ${idle}s ago)`, bad: true } : { text: 'running', bad: false };
   })();
 
-  return (
-    <View style={styles.overlay} pointerEvents="box-none">
-      <ScrollView style={styles.panelScroll} contentContainerStyle={styles.panel}>
-        {mock && <Text style={styles.badge}>MOCK MODE: fake detections</Text>}
-        <Text style={styles.status} accessibilityLiveRegion="polite">{status}</Text>
-        <Text style={[styles.wakeHint, wakeLine.bad && styles.debugBad]} accessibilityLiveRegion="polite">
-          {wakeEnabled && wake.state === 'listening'
-            ? (guiding
-              ? 'Hands-free: say Hey Jarvis, then stop — or another request.'
-              : 'Hands-free: say Hey Jarvis, then your request.')
-            : `Hey Jarvis: ${wakeLine.text}`}
-        </Text>
-        <View style={styles.calibration}>
-          <Text style={styles.calibrationText}>
-            {guiding ? 'Learning paused while guiding' : calibration?.status === 'mapping' ? 'Learning in the background' : 'Apartment memory'}
-          </Text>
-          <Text style={styles.chipText}>
-            {calibration ? `${calibration.places.length} places · ${calibration.connections_total} connections` : 'Connect to begin.'}
-          </Text>
-          {calibration?.status === 'mapping' && <Text style={styles.chipText}>
-            Objects in latest frame: {calibration.sightings.map((s) => s.item).join(', ') || 'none'}
-          </Text>}
-          {calibration?.places.length ? <Text style={styles.chipText}>
-            {calibration.coverage_ready ? 'Return paths recorded between mapped places.' : 'More views or return paths needed.'}
-          </Text> : null}
-          {showDebug && <Pressable onPress={() => void changeCalibration(calibration?.status === 'mapping' ? 'finish' : 'start')}
-            disabled={!connected || calibrationBusy || testing || !!guiding || !calibration?.available}
-            accessibilityRole="button" accessibilityState={{ disabled: !connected || calibrationBusy || testing || !!guiding || !calibration?.available, busy: calibrationBusy }}
-            accessibilityLabel={calibration?.status === 'mapping' ? 'Finish calibration' : calibration?.places.length ? 'Continue calibration' : 'Start calibration'}
-            style={styles.small}>
-            <Text style={styles.smallText}>{calibrationBusy ? 'Saving…' : calibration?.status === 'mapping'
-              ? 'Finish calibration' : calibration?.places.length ? 'Continue calibration' : 'Start calibration'}</Text>
-          </Pressable>}
-          {calibration && !calibration.available && <Text style={styles.chipText}>
-            Calibration is unavailable with the current server vision mode.
-          </Text>}
-        </View>
-        {guiding && (
-          <Pressable onPress={stopGuidance} accessibilityRole="button"
-            accessibilityLabel={`Guiding to ${guiding}. ${cue || 'Searching'}. Tap to stop guidance.`}>
-            <Text style={styles.cue}>{cue || `Searching for ${guiding}…`}</Text>
-          </Pressable>
-        )}
-        {calibration?.status !== 'mapping' && <View style={styles.rooms} accessibilityRole="radiogroup">
-          {['', ...rooms].map((r) => (
-            <Pressable key={r} onPress={() => setRoom(r)} accessibilityRole="radio"
-              accessibilityState={{ selected: r === room }} accessibilityLabel={r ? `Room ${r}` : 'Automatic room recognition'}
-              style={[styles.chip, r === room && styles.chipOn]}>
-              <Text style={[styles.chipText, r === room && styles.chipTextOn]}>{r || 'Automatic'}</Text>
-            </Pressable>
-          ))}
-        </View>}
-        {showDebug && (
-          // Debug counters for sighted helpers; hidden from screen readers so they are not read aloud.
-          <View style={styles.debug} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-            <Text style={styles.debugText}>
-              Camera: {cameraReady ? 'ready' : 'starting...'}{restarts > 0 ? ` (restarted ${restarts}x)` : ''} | Backend: {connected ? 'connected' : 'NOT connected'}
-            </Text>
-            {!connected && (
-              <Text style={[styles.debugText, styles.debugBad]}>
-                Photos only start after the backend connects. Open settings, enter the server address and press Connect.
-              </Text>
-            )}
-            <Text style={[styles.debugText, loopLine.bad && styles.debugBad]}>Memory loop: {loopLine.text}</Text>
-            <Text style={[styles.debugText, wakeLine.bad && styles.debugBad]}>Wake word: {wakeLine.text}</Text>
-            <Text style={styles.debugText}>
-              Photo: {flight.inProgress ? `in progress for ${Math.round(flight.ageMs(now) / 1000)}s` : 'idle'}
-            </Text>
-            <Text style={styles.debugText}>{summarize('Memory', memStats)}</Text>
-            <Text style={[styles.debugText, memStats.last?.kind === 'failed' && styles.debugBad]}>
-              Last memory frame: {describeLast(memStats, now)}
-            </Text>
-            {memStats.firstFailure && memStats.firstFailure !== memStats.last && (
-              <Text style={[styles.debugText, styles.debugBad]}>First failure: {describeFirstFailure(memStats, now)}</Text>
-            )}
-            {testResult !== '' && <Text style={styles.debugText}>{testResult}</Text>}
-            {guiding && <Text style={styles.debugText}>{summarize('Guide', guideStats)}</Text>}
-            {guiding && (
-              <Text style={[styles.debugText, guideStats.last?.kind === 'failed' && styles.debugBad]}>
-                Last guide frame: {describeLast(guideStats, now)}
-              </Text>
-            )}
-          </View>
-        )}
-        {wakeAvailable && (
-          <Pressable onPress={() => setWakeOn((w) => !w)} accessibilityRole="switch" accessibilityState={{ checked: wakeOn }}
-            accessibilityLabel="Hey Jarvis wake word" style={styles.link}>
-            <Text style={styles.linkText}>Hey Jarvis: {wakeOn ? 'ON (tap to turn off)' : 'OFF (tap to turn on)'}</Text>
-          </Pressable>
-        )}
-        <Pressable onPress={testPhoto} disabled={calibrationBusy || testing} accessibilityRole="button" accessibilityLabel="Test one photo" style={styles.link}>
-          <Text style={styles.linkText}>Test one photo (camera check)</Text>
-        </Pressable>
-        <Pressable onPress={() => setShowDebug((d) => !d)} accessibilityRole="button"
-          accessibilityLabel={showDebug ? 'Hide debug counters' : 'Show debug counters'} style={styles.link}>
-          <Text style={styles.linkText}>{showDebug ? 'Hide' : 'Show'} debug counters</Text>
-        </Pressable>
-        <Pressable onPress={() => setShowSettings((s) => !s)} accessibilityRole="button"
-          accessibilityLabel="Server settings" style={styles.link}>
-          <Text style={styles.linkText}>{connected ? 'Connected' : 'Not connected'} · settings</Text>
-        </Pressable>
-        {showSettings && (
-          <View style={styles.settings}>
-            <TextInput value={server} onChangeText={changeServer} editable={!calibrationBusy} autoCapitalize="none" autoCorrect={false}
-              placeholder="http://192.168.x.x:8000 or https://….ngrok-free.app" placeholderTextColor="#999"
-              accessibilityLabel="Server address" style={styles.input} onSubmitEditing={connect} />
-            <Pressable onPress={connect} disabled={calibrationBusy} accessibilityRole="button" accessibilityLabel="Connect" style={styles.small}>
-              <Text style={styles.smallText}>Connect</Text>
-            </Pressable>
-          </View>
-        )}
-      </ScrollView>
-
-      <View style={styles.bottom}>
-        {/* Sighted-helper fallbacks only. Blind users: Hey Jarvis is the only supported path. */}
-        {showDebug && stt !== 'elevenlabs' && (
-          <View style={styles.settings} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-            <TextInput value={typed} onChangeText={setTyped} onSubmitEditing={submitTyped} returnKeyType="send"
-              placeholder="where's my wallet" placeholderTextColor="#999"
-              accessibilityLabel="Type a request (helper only)" style={styles.input} />
-            <Pressable onPress={submitTyped} accessibilityRole="button" accessibilityLabel="Send" style={styles.small}>
-              <Text style={styles.smallText}>Send</Text>
-            </Pressable>
-          </View>
-        )}
-        {showDebug && guiding && (
-          <Pressable onPress={stopGuidance} accessibilityRole="button" accessibilityLabel="Stop guidance"
-            accessibilityHint="Or say Hey Jarvis, then stop"
-            style={styles.stop}>
-            <Text style={styles.stopText}>Stop</Text>
-          </Pressable>
-        )}
-        {showDebug && (
-          <Pressable onPressIn={beginTalk} onPressOut={endTalk} disabled={stt !== 'elevenlabs'}
-            accessibilityRole="button" accessibilityLabel="Hold to talk helper backup"
-            accessibilityHint="Helper only. Blind users should say Hey Jarvis."
-            style={[styles.talkBackup, listening && styles.talkOn, stt !== 'elevenlabs' && styles.talkOff]}>
-            <Text style={styles.backupText}>{listening ? 'Listening…' : 'Hold to talk (helper)'}</Text>
-          </Pressable>
-        )}
-      </View>
-    </View>
-  );
+  return null;
 }
 
 const styles = StyleSheet.create({
