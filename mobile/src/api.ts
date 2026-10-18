@@ -1,3 +1,6 @@
+import { File } from 'expo-file-system';
+import { makeFilePart } from './filePart';
+
 // Backend wrappers. The app never talks to Gemini, Perceptron or ElevenLabs directly: the backend
 // owns every key. Field names match docs/CONTRACT.md.
 
@@ -19,6 +22,9 @@ export type GuideResponse = {
 
 /** A local file to upload (React Native's FormData takes {uri, name, type}). */
 export type UploadFile = { uri: string; name: string; type: string };
+
+/** A local file as a multipart part Expo SDK 57's fetch accepts (it rejects the old {uri, name, type} form). */
+const filePart = (f: UploadFile) => makeFilePart(new File(f.uri), f.name, f.type);
 
 export class Api {
   constructor(public base: string) {}
@@ -59,14 +65,14 @@ export class Api {
 
   observe(frame: UploadFile, room: string) {
     const body = new FormData();
-    body.append('frame', frame as unknown as Blob);
+    body.append('frame', filePart(frame));
     body.append('room', room);
     return this.send<{ sightings: unknown[] } | null>('/api/observe', { method: 'POST', body });
   }
 
   guide(frame: UploadFile, item: string, yawDeg?: number | null) {
     const body = new FormData();
-    body.append('frame', frame as unknown as Blob);
+    body.append('frame', filePart(frame));
     body.append('item', item);
     if (typeof yawDeg === 'number') body.append('yaw_deg', String(yawDeg));
     return this.send<GuideResponse | null>('/api/guide', { method: 'POST', body });
@@ -96,7 +102,7 @@ export class Api {
 
   transcribe(audio: UploadFile) {
     const body = new FormData();
-    body.append('audio', audio as unknown as Blob);
+    body.append('audio', filePart(audio));
     return this.send<{ text: string; provider: string }>('/api/transcribe', { method: 'POST', body }, 15000);
   }
 }

@@ -25,7 +25,8 @@
     "ios": "expo start --ios",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "node --test src/pure.test.mjs"
+    "test": "node --test src/pure.test.mjs",
+    "check:upload": "node scripts/check-upload-format.mjs"
   },
   "private": true
 }
