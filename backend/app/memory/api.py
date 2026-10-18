@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from ..models import RememberedItem, Sighting
 from . import store as memory
 from .models import MemoryMap, MemoryMapUpdate, SightingPlaceUpdate
+from .route import directions_to_item
 
 router = APIRouter(prefix="/api/memory", tags=["memory"])
 
@@ -21,6 +22,11 @@ def teach_map(update: MemoryMapUpdate):
 @router.get("/items", response_model=list[RememberedItem])
 def read_items():
     return memory.recalled_items()
+
+
+@router.get("/directions")
+def read_directions(item: str, from_place: str | None = None):
+    return directions_to_item(item, from_place_id=from_place)
 
 
 @router.put("/sightings/{sighting_id}/place", response_model=Sighting)

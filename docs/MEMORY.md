@@ -9,14 +9,14 @@ Taught places and directed connections feed room-to-room navigation: `/api/guide
 the camera against place landmarks (Perceptron structured call in `vision.localize`), plans a
 BFS route over `place_connections` (`memory.plan_route`), and speaks the next stored
 instruction until the target item is visible again (then existing beep/clock guidance).
-Facing/obstacle checks and ElevenLabs are not implemented. Memory CLI commands themselves do
-not call Perceptron.
+Departure-facing checks now gate walking instructions; obstacle avoidance remains unfinished. ElevenLabs speech is implemented separately (see
+`CONTRACT.md`). Memory CLI commands themselves do not call Perceptron.
 
 ## What is remembered
 
 - **Place:** stable ID, readable name, room, description, and text landmarks. For example,
   `kitchen_counter`, “counter beside the sink,” with landmarks “sink” and “faucet.”
-- **Connection:** an explicitly taught direction from one place to another, with a departure
+- **Connection:** a saved direction from map teaching or walkthrough mapping, with a departure
   view, instruction, and arrival view. The reverse direction is not invented. `/api/guide`
   speaks these instructions in order along the shortest directed path.
 - **Sighting:** existing object, room, model-written spot, time, crop, box, and confidence,
@@ -27,6 +27,9 @@ An object being absent from a later frame does not erase its last sighting. A ne
 at an unassigned place returns `destination: null`; it does not revive an older mapped
 destination. `found: true` means “has been seen,” not “visible now” or “still there.”
 The profile's `home_spot` is a preference, not an observed location.
+Directions follow the same newest-sighting rule. A generic surface description, even an exact
+place name in `spot`, does not establish an assignment. If the latest sighting is unassigned,
+confirm its actual place and assign it, or capture a new observation with sufficient landmarks.
 
 Sightings can now be assigned to places **automatically** during `/api/observe` and video
 ingestion (`auto_place=True` by default) or **manually** via `place_id` / `assign`. In a
@@ -125,7 +128,10 @@ a `session_id` so automatic per-object place discovery and matching run by defau
 - `GET /api/memory/items`: latest sightings/destinations for the current watchlist.
 - `PUT /api/memory/sightings/123/place`: `{ "place_id": "kitchen_counter" }` to link,
   or `{ "place_id": null }` to clear; returns the updated sighting.
-- `GET /api/where?item=wallet`: existing response plus `destination` (full place or null).
+- `GET /api/where?item=wallet`: destination (full place or null) and last-seen description;
+  optional `from_place` adds `directions` when the starting place and directed route are known.
+- `GET /api/memory/directions?item=wallet&from_place=bedroom_door`: route status, places, steps,
+  and hops. Without a known starting ID, returns `unknown_current` when the destination is known.
 
 IDs are 1–80 lowercase letters, digits, underscores, or hyphens, beginning with a letter/digit.
 Unknown places/sightings return 404; room conflicts return 409; malformed requests return 422.
@@ -147,7 +153,7 @@ After teaching `examples/two_room_memory.json` and assigning a sighting to `kitc
 # Force: item not in frame, camera at bedroom_door
 curl -s -X POST http://localhost:8000/api/guide \
   -F frame=@/path/to/frame.jpg -F item=keys \
-  -H "X-Mock-Hide: 1" -H "X-Mock-Place: bedroom_door"
+  -H "X-Mock-Hide: 1" -H "X-Mock-Place: bedroom_door" -H "X-Mock-Facing: aligned"
 ```
 
 Debug localization alone: `python -m app.vision.cli localize frame.jpg --mock --mock-place bedroom_door`.
@@ -164,8 +170,60 @@ python -m app.memory.cli map
 
 Default sample rate is 0.5 fps. Reuse the same `DB_PATH` across clips to grow the map.
 JSON `teach` remains an optional override, not the required training path.
+Record and verify both directions for routes the demo will use. A recording from counter to
+bedroom does not supply instructions from bedroom to counter. Model-generated connections still
+need to be checked against the actual apartment and facing direction before a walking trial.
+
+## Step 1 verification: no guessed routes
+
+From `Sightline/backend`, run:
+
+```bash
+../venv/bin/python -m pytest tests/test_navigation_checkpoint.py -q -s
+```
+
+This runs 12 checks using a temporary fictional apartment, mock camera detections/localization,
+and a fresh database per case. It prints spoken responses and leaves your real memory and keys
+untouched. It exercises a supported route, arrival, final visual guidance, unknown starts,
+ambiguous/unassigned destinations, cleared assignments, lost localization, and missing return
+connections. It verifies backend decisions, not real camera accuracy or phone audio.
+See [demo checkpoints](DEMO_CHECKPOINTS.md) for the expected results and next step.
+
+To inspect your existing memory without modifying it:
+
+```bash
+../venv/bin/python -m app.memory.cli directions wallet
+../venv/bin/python -m app.memory.cli map
+```
+
+The first command should not produce walking steps without a starting place. If the latest
+wallet sighting has an assignment, expect `unknown_current`; otherwise expect
+`unknown_destination` or `item_not_seen`. After confirming a starting ID from your actual map,
+pass `--from-place YOUR_CONFIRMED_PLACE_ID`. This is an inspection tool; live guidance obtains
+the starting place from the camera.
 
 ## Remaining work
 
-Verify mapwalk + localize on live Perceptron apartment walks; expose a full directions list
-after offline video+where; facing/obstacle checks; ElevenLabs; sighting dedupe.
+Verify native calibration, mapwalk, and localization on live Perceptron apartment walks;
+physical facing validation, obstacle avoidance, and sighting dedupe. Native automatic room/session handling and the live
+calibration flow are implemented.
+Full directions lists and ElevenLabs speech exist. The live apartment demo remains unverified.
+
+## Live first-use calibration (latest update)
+
+The native phone learns automatically while connected and not guiding; manual calibration controls
+are retained in the debug panel. No starting ID or room
+labels are needed: the camera discovers places and records supported directed transitions.
+Automatic room assignment and observation session IDs are wired into the native app too.
+See [CALIBRATION.md](CALIBRATION.md) for an isolated two-room trial. Full Perceptron calibration
+retains open-vocabulary object memory. The scripted mock walk includes a wallet, cup, and
+chapstick; those fixtures are not a whitelist for real inference.
+
+Physical camera recognition, transition correctness, facing, and obstacle checks still need
+verification. An explicit `from_place` remains only for tools querying routes without a camera.
+
+See [NAVIGATION_TRIAL.md](NAVIGATION_TRIAL.md) for the implemented facing gate and its phone test.
+
+Unseen objects now get an explicit unknown-location answer for both Where and Find requests.
+Find does not start guidance until at least one sighting exists. See CALIBRATION.md for continuous
+learning, query ordering, automatic navigation handoff, and resuming after Stop.

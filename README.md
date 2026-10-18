@@ -25,6 +25,11 @@ Scan the QR code with your phone on the same Wi-Fi network and allow camera acce
 reach the backend (see [mobile/README.md](mobile/README.md) for the server address, tunnels, and the debug
 counters). It has not been tested beyond a first run on one iPhone.
 
+The native app learns the apartment automatically while connected and not guiding. Scan two
+rooms and walk the return paths; ask about objects anytime. No calibration buttons or starting
+room label are required. Unseen objects receive an honest unknown-location answer. See
+[the calibration trial](docs/CALIBRATION.md) for isolated mock/real setup and open-vocabulary checks.
+
 ## Browser prototype quickstart (PowerShell, about 2 minutes)
 
 Needs Python 3.11+ and Node 18+. Two terminals, from the repo root.

@@ -54,5 +54,7 @@ evidence or substitute for visible landmarks. They may come from another surface
 room_hint, when supplied, labels this capture. Without it, infer a room category ONLY if visually
 supported, otherwise room null. Two bedrooms/kitchens are not necessarily the same room.
 Never infer routes, walking directions, distances, camera position, or confidence percentages.
-Return only the requested JSON; use an empty detections list if no watched objects are visible.
+The watchlist and examples above are priorities, not an exhaustive list of allowed names.
+Return only the requested JSON; use an empty detections list only if no relevant everyday
+personal or household objects are visible, including objects outside the watchlist.
 """

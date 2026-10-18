@@ -47,12 +47,12 @@ def test_observe_respects_profile_watchlist(client, jpeg):
 
 def test_where_never_seen(client):
     r = client.get("/api/where", params={"item": "wallet"}).json()
-    assert r["found"] is False and r["say"] == "I haven't seen your wallet yet."
+    assert r["found"] is False and r["say"] == "I don't know where your wallet is yet. I haven't seen it."
 
 
 def test_where_unknown_item(client):
     r = client.get("/api/where", params={"item": "unicorn"}).json()
-    assert r["found"] is False and r["say"] == "I haven't seen your unicorn yet."
+    assert r["found"] is False and r["say"] == "I don't know where your unicorn is yet. I haven't seen it."
     bad = client.get("/api/where", params={"item": "???"}).json()
     assert bad["found"] is False and "which item" in bad["say"]
 

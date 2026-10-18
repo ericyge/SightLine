@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response  # noqa: E402
 
 from . import db, guidance, llm, memory, stt, tts, wake  # noqa: E402
 from .memory.api import router as memory_router  # noqa: E402
+from .memory import calibration  # noqa: E402
 from .memory.models import PlaceID  # noqa: E402
 from .memory.observation import UNKNOWN_ROOM, observe_and_save  # noqa: E402
 from .events import broadcaster  # noqa: E402
@@ -53,6 +54,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        calibration.reset_continuity()
         reset_vision()
 
 
@@ -123,6 +125,9 @@ def _mock_hints(request: Request) -> dict:
     place = request.headers.get("x-mock-place") or request.query_params.get("mock_place")
     if place is not None:
         hints["place"] = place
+    facing = request.headers.get("x-mock-facing") or request.query_params.get("mock_facing")
+    if facing is not None:
+        hints["facing"] = facing
     hide = request.headers.get("x-mock-hide") or request.query_params.get("mock_hide")
     if hide is not None and hide.strip().lower() in {"1", "true", "yes"}:
         hints["hide"] = True
@@ -140,29 +145,48 @@ def _nav_state(name: str, now: float) -> guidance.NavigateState:
 def _guide_payload(*, found: bool, say: str = "", beep_ms: int = 0, mode: str = "lost",
                    current_place: str | None = None, destination: dict | None = None,
                    next_instruction: str | None = None, point=None, box=None, angle=None,
-                   clock=None, distance=None, pan: float = 0.0) -> dict:
+                   clock=None, distance=None, pan: float = 0.0, departure_status: str | None = None) -> dict:
     return {"found": found, "point": point, "box": box, "angle": angle, "clock": clock,
             "distance": distance, "pan": pan, "say": say, "beep_ms": beep_ms, "mode": mode,
             "current_place": current_place, "destination": destination,
-            "next_instruction": next_instruction}
+            "next_instruction": next_instruction, "departure_status": departure_status}
 
 
 def _navigate_guide(name: str, frame: bytes, hints: dict, now: float, yaw: float | None = None) -> dict:
     """Room-to-room cue when the target item is not visible in this frame."""
     history = db.recent_sightings(name, 1)
+    saved_map = memory.get_map()
+    places = saved_map["places"]
     destination = memory.destination_for(history[0]) if history else None
     nav = _nav_state(name, now)
     if destination is None:
+        if history:
+            text, nav.last_key = guidance.navigate_say(
+                f"I last saw your {name}, but couldn't identify its place. Please slowly scan your surroundings.",
+                f"unassigned:{history[0]['id']}", nav.last_key)
+            return _guide_payload(found=False, say=text, mode="lost")
+        nav.last_key = None
         state = _guide_states.get(name)
         if state is None or now - state.touched > GUIDE_STATE_TTL_S:
             state = _guide_states[name] = guidance.GuideState(since=now)
         result = guidance.compute_guide(name, None, state, db.guidance_style(), fov_h(), now, yaw)
         return _guide_payload(found=False, say=result["say"], mode="lost")
 
-    places = memory.get_map()["places"]
-    loc = get_vision().localize(frame, places, hints)
+    # Check facing in the localization request: still two provider calls per guide frame.
+    candidates = []
+    for place in places:
+        route = memory.plan_route(place["id"], destination["id"], saved_map["connections"], places)
+        hop = route.next_hop
+        departure = ({"to_place_id": hop.to_place_id, "departure_view": hop.departure_view}
+                     if hop and hop.departure_view.strip() else None)
+        candidates.append({**place, "departure": departure})
+    try:
+        loc = get_vision().localize(frame, candidates, hints)
+    except VisionUnavailable:
+        nav.last_key = None  # Repeat the instruction after recovery from a failed check.
+        raise
     current_id = loc.place_id
-    plan = memory.plan_route(current_id, destination["id"])
+    plan = memory.plan_route(current_id, destination["id"], saved_map["connections"], places)
 
     if plan.status == "already_there":
         text, nav.last_key = guidance.navigate_say(
@@ -175,14 +199,26 @@ def _navigate_guide(name: str, frame: bytes, hints: dict, now: float, yaw: float
     if plan.status == "ok" and plan.next_hop is not None:
         hop = plan.next_hop
         key = f"{hop.from_place_id}->{hop.to_place_id}"
+        facing = loc.departure_status if hop.departure_view.strip() else "unknown"
+        if facing != "aligned":
+            cue = {
+                "left": "Pause walking. Turn slowly left in place so I can check the route.",
+                "right": "Pause walking. Turn slowly right in place so I can check the route.",
+                "blocked": "Stop. The route appears blocked. Keep still while I check again.",
+            }.get(facing, "Pause walking. Slowly scan in place so I can check which way you're facing.")
+            text, nav.last_key = guidance.navigate_say(cue, f"{key}:{facing}", nav.last_key)
+            return _guide_payload(found=False, say=text, mode="navigate",
+                                  current_place=current_id, destination=destination,
+                                  departure_status=facing)
+        key = f"{key}:aligned:{hop.instruction}"
         text, nav.last_key = guidance.navigate_say(hop.instruction, key, nav.last_key)
         return _guide_payload(found=False, say=text, mode="navigate",
                               current_place=current_id, destination=destination,
-                              next_instruction=hop.instruction)
+                              next_instruction=hop.instruction, departure_status="aligned")
 
     if plan.status == "unknown_current":
         text, nav.last_key = guidance.navigate_say(
-            f"Last seen at {destination['name']}, but I can't tell where you are yet.",
+            f"Pause walking. Last seen at {destination['name']}, but I can't tell where you are yet. Please slowly scan your surroundings.",
             f"noloc:{destination['id']}", nav.last_key)
         return _guide_payload(found=False, say=text, mode="lost",
                               current_place=None, destination=destination)
@@ -233,6 +269,37 @@ def _event(type_: str, **payload) -> dict:
 
 # ---- routes -----------------------------------------------------------------------------
 
+@app.get("/api/calibration", response_model=calibration.CalibrationStatus)
+def calibration_status():
+    return calibration.status(get_vision())
+
+
+@app.post("/api/calibration/start", response_model=calibration.CalibrationStatus)
+def calibration_start():
+    return calibration.start(get_vision())
+
+
+@app.post("/api/calibration/finish", response_model=calibration.CalibrationStatus)
+def calibration_finish(session: calibration.CalibrationSession):
+    return calibration.finish(get_vision(), session.session_id)
+
+
+@app.post("/api/calibration/frame", response_model=calibration.CalibrationStatus)
+async def calibration_frame(request: Request, frame: UploadFile = File(...),
+                            session_id: PlaceID = Form(...), sequence: int = Form(..., ge=1),
+                            captured_at: str = Form(...)):
+    data = await read_frame(frame)
+    try:
+        when = _parse_ts(captured_at).astimezone(timezone.utc)
+    except ValueError:
+        raise HTTPException(422, "captured_at must be an ISO timestamp.") from None
+    result = await run_in_threadpool(calibration.process_frame, get_vision(), data, session_id,
+                                     sequence, when, _mock_hints(request))
+    broadcaster.publish(_event("calibration", **result))
+    if result["sightings"]:
+        broadcaster.publish(_event("sighting", sightings=result["sightings"], frame=_frame_data_url(data)))
+    return result
+
 @app.get("/api/health", response_model=HealthResponse)
 def health():
     """Mode check so the UI can show a MOCK badge."""
@@ -270,39 +337,41 @@ async def observe(request: Request, frame: UploadFile = File(...), room: str | N
     # TODO(A): skip saving when an item hasn't moved since its last sighting (dedupe / throttle).
     try:
         sightings, _ = await run_in_threadpool(observe_and_save, get_vision(), data, room, when,
-            place_id=place_id, auto_place=auto_place, session_id=session_id, hints=_mock_hints(request))
+            place_id=place_id, auto_place=auto_place, session_id=session_id, hints=_mock_hints(request), coalesce=True)
     except VisionBusy:
         return Response(status_code=204)   # the fast live client is busy with an earlier frame: drop this one
     broadcaster.publish(_event("sighting", sightings=sightings, frame=_frame_data_url(data)))
     return {"sightings": sightings}
 
 
-def _where_answer(item: str) -> WhereResponse:
+def _where_answer(item: str, from_place: str | None = None) -> WhereResponse:
     """Answer "where is X" from stored sightings (shared by /api/where and /api/chat)."""
     name = db.resolve_item(item)
     history = db.recent_sightings(name, 5) if name else []
     if not history:
         label = name or item.strip().lower()
-        text = (f"I haven't seen your {label} yet." if name
+        text = (f"I don't know where your {label} is yet. I haven't seen it." if name
                 else "Please tell me which item you're looking for.")
         return WhereResponse(item=label, found=False, say=text)
     last = history[0]
     destination = memory.destination_for(last)
+    route_info = memory.directions_to_item(name, from_place_id=from_place)
     minutes = max(0.0, (datetime.now(timezone.utc) - _parse_ts(last["ts"])).total_seconds() / 60)
     text = where_say(last["room"], last["spot"], minutes)
     if destination:
         room_phrase = f" in your {destination['room']}" if destination["room"] != UNKNOWN_ROOM else ""
         text = f"Last seen at {destination['name']}{room_phrase}, {ago_phrase(minutes)}."
     return WhereResponse(
-        item=name, history=history, destination=destination, say=text,
+        item=name, history=history, destination=destination,
+        directions=route_info.get("steps", []), say=text,
         last=WhereLast(room=last["room"], spot=last["spot"], minutes_ago=round(minutes, 1),
                        thumb=last["thumb"], confidence=last["confidence"]))
 
 
 @app.get("/api/where", response_model=WhereResponse)
-async def where(item: str):
+async def where(item: str, from_place: str | None = None):
     """Where was this item last seen? Always 200; found=false when never seen."""
-    answer = _where_answer(item)
+    answer = _where_answer(item, from_place=from_place)
     broadcaster.publish(_event("say", text=answer.say, source="where"))
     return answer
 
@@ -319,7 +388,7 @@ async def guide(request: Request, frame: UploadFile = File(...), item: str = For
     vision = get_vision()
     hints = _mock_hints(request)
     # Hide overrides other mock detect hints so navigate can be tested without the item in frame.
-    detect_hints = {k: v for k, v in hints.items() if k != "place"}
+    detect_hints = {k: v for k, v in hints.items() if k not in {"place", "facing"}}
     if vision.mock and not target["watched"] and not detect_hints and not db.recent_sightings(name, 1):
         detections = []
     else:
@@ -381,7 +450,7 @@ def _chat_response(result: llm.LLMResult, provider: str) -> ChatResponse:
         name = db.resolve_item(str(args.get("item", "")))
         if name is None:
             return _ask_item(provider)
-        if call.name == "find_item":
+        if call.name == "find_item" and db.recent_sightings(name, 1):
             return ChatResponse(intent="find", item=name, say=f"Looking for your {name}.",
                                 provider=provider)
         return ChatResponse(intent="where", item=name, say=_where_answer(name).say,

@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from .. import db
 from . import store as memory
 from .models import MemoryMapUpdate, SightingPlaceUpdate
+from .route import directions_to_item
 
 
 def parser() -> argparse.ArgumentParser:
@@ -18,8 +19,12 @@ def parser() -> argparse.ArgumentParser:
     teach.add_argument("file", type=Path)
     commands.add_parser("map", help="Show the saved map")
     commands.add_parser("items", help="Show the latest sighting and destination of watched and seen items")
-    where = commands.add_parser("where", help="Show one item's five latest sightings and destination")
+    where = commands.add_parser("where", help="Show one item's five latest sightings, destination, and directions")
     where.add_argument("item")
+    where.add_argument("--from-place", help="Known current place ID; directions are omitted without it")
+    dirs = commands.add_parser("directions", help="Print step-by-step directions to reach an item")
+    dirs.add_argument("item")
+    dirs.add_argument("--from-place", help="Known current place ID; directions are omitted without it")
     assign = commands.add_parser("assign", help="Link one saved sighting to a taught place")
     assign.add_argument("sighting_id", type=int)
     target = assign.add_mutually_exclusive_group(required=True)
@@ -41,13 +46,17 @@ def main(argv=None) -> int:
         elif args.command == "assign":
             update = SightingPlaceUpdate(place_id=None if args.clear else args.place_id)
             result = memory.assign_sighting(args.sighting_id, update.place_id)
+        elif args.command == "directions":
+            result = directions_to_item(args.item, from_place_id=args.from_place)
         else:
             name = db.resolve_item(args.item)
             watched = db.is_watched(args.item)
             history = db.recent_sightings(name, 5) if name else []
+            route_info = directions_to_item(args.item, from_place_id=args.from_place)
+            dest = memory.destination_for(history[0] if history else None)
             result = {"item": name or args.item.strip().lower(), "watched": watched,
                       "found": bool(history), "history": history,
-                      "destination": memory.destination_for(history[0] if history else None)}
+                      "destination": dest, "directions": route_info.get("steps", [])}
         print(json.dumps(result, indent=2))
         return 0
     except (ValueError, OSError) as exc:

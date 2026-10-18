@@ -11,7 +11,7 @@ from .models import (
     SightingPlaceUpdate,
 )
 from .observation import MAX_CANDIDATES, UNKNOWN_ROOM, observe_and_save, place_context, resolve_frame
-from .route import RouteHop, RoutePlan, plan_route
+from .route import RouteHop, RoutePlan, directions_to_item, plan_route
 from .store import (
     MemoryConflict,
     MemoryNotFound,
@@ -45,6 +45,7 @@ __all__ = [
     "apply_survey",
     "assign_sighting",
     "destination_for",
+    "directions_to_item",
     "get_map",
     "get_place",
     "mapwalk_video",

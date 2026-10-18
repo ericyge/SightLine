@@ -112,3 +112,31 @@ With the backend set up for it (root README: "Hey Jarvis" wake word), the debug 
 How it behaves on iPhone, from expo-audio's native code: starting the microphone stream switches the phone to **record-only**, so nothing can play while it runs. The app therefore turns the wake word off while guiding (beeps), while a reply is being spoken, and while you hold the talk button, then restores playback and turns it back on. That also means "Hey Jarvis, stop" does not work during guidance; use the Stop button.
 
 Unverified on a real phone: the microphone stream itself (Expo Go), the level thresholds for detecting the end of your request (`DEFAULT_ENDPOINT` in `wakeCore.ts`; the debug box shows the live mic level to tune them), the WebSocket through a Cloudflare/ngrok tunnel, how well a real voice triggers the model, and Android.
+
+## Apartment calibration
+
+Start / Finish / Continue calibration now appears above the room selector. You can also say
+“Start calibration,” “Continue mapping,” or “Finish calibration” through hold-to-talk. Starting
+requires no manual room or initial place. A new empty map waits for calibration instead of
+immediately recording bedroom-labeled observations. During calibration, frame uploads survey
+places and independently remember objects; the screen shows place/connection counts and object
+names, and the phone speaks changes. Finish saves incomplete maps too and reports missing routes.
+
+After finishing, normal object memory resumes with **Automatic** room selection and session
+context. Use the full backend `PERCEPTRON_MODE=perceptron`; detect-only `live` cannot calibrate.
+The scrollable panel keeps controls reachable on smaller screens. Existing maps are retained.
+See [the calibration guide](../docs/CALIBRATION.md) for clean-database setup, a no-key mock trial,
+expected outputs, timeouts, and limits. Physical device/VoiceOver verification remains pending.
+
+After calibration, “Find my wallet” now waits for camera-facing alignment before speaking the
+next walking instruction. Scan/turn-in-place cues and a blockage stop cue use existing speech.
+Camera/upload errors announce a pause/retry once and clear old visual beeps. See
+[the navigation trial](../docs/NAVIGATION_TRIAL.md); physical device behavior remains unverified.
+
+### Automatic learning (current behavior)
+
+Connect and walk around: the app learns places, paths, and objects without Start/Finish buttons.
+Ask Where at any time; Find pauses learning only for a previously seen object. Stop resumes
+learning. Unseen items get “I don't know where your [item] is yet. I haven't seen it.”
+Manual calibration controls remain under Show debug counters; the panel is hidden initially.
+Learning runs while the app/camera is active, not while the app is closed.

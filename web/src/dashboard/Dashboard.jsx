@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { mergeSightings } from "./timeline.js";
 
 const MAX_TIMELINE = 30;
 const MAX_LOG = 100;
@@ -91,8 +92,8 @@ export default function Dashboard() {
         boxes: ev.sightings.map((s) => ({ box: s.box, label: s.item })),
         arrow: null,
       }));
-      // TODO(C): collapse repeats (same item/spot) and backfill the timeline on load.
-      setTimeline((t) => [...ev.sightings.map((s) => ({ ...s, key: Math.random() })), ...t].slice(0, MAX_TIMELINE));
+      // Repeated observations refresh their existing row. Backfill remains a separate TODO.
+      setTimeline((t) => mergeSightings(t, ev.sightings, MAX_TIMELINE));
     } else if (ev.type === "guide") {
       setView((v) => ({
         frame: ev.frame ?? v.frame,

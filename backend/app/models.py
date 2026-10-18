@@ -61,6 +61,7 @@ class WhereResponse(BaseModel):
     last: WhereLast | None = None
     history: list[Sighting] = Field(default_factory=list)
     destination: Place | None = None
+    directions: list[str] = Field(default_factory=list)
     say: str
 
 
@@ -87,6 +88,7 @@ class GuideResponse(BaseModel):
     current_place: str | None = None
     destination: Place | None = None
     next_instruction: str | None = None
+    departure_status: Literal["aligned", "left", "right", "blocked", "unknown"] | None = None
 
 
 class WatchItem(BaseModel):

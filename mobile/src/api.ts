@@ -1,5 +1,6 @@
 import { File } from 'expo-file-system';
 import { makeFilePart } from './filePart';
+import { observationFields } from './calibration';
 
 // Backend wrappers. The app never talks to Gemini, Perceptron or ElevenLabs directly: the backend
 // owns every key. Field names match docs/CONTRACT.md.
@@ -16,9 +17,19 @@ export type Health = {
   wake?: boolean;                          // true when WS /ws/wake can run (WAKE_ENABLED, packages, models)
 };
 export type Profile = { watchlist: { name: string }[]; rooms: string[]; guidance_style: string };
+export type CalibrationStatus = {
+  session_id: string | null; status: 'idle' | 'mapping' | 'saved'; available: boolean; mock: boolean;
+  frames_processed: number; last_sequence: number; current_place: { id: string; name: string } | null;
+  places: { id: string; name: string; room: string }[]; rooms: string[]; connections_total: number;
+  missing_paths: { from_place_id: string; to_place_id: string }[]; coverage_ready: boolean;
+  action: string | null; connection_added: boolean; memory_warning: string | null; say: string;
+  sightings: { item: string; place_id: string | null }[];
+};
 export type GuideResponse = {
   found: boolean; point: number[] | null; box: number[] | null; angle: number | null; clock: number | null;
   distance: 'far' | 'near' | 'reach' | null; pan: number; say: string; beep_ms: number;
+  next_instruction?: string | null;
+  departure_status?: 'aligned' | 'left' | 'right' | 'blocked' | 'unknown' | null;
 };
 
 /** A local file to upload (React Native's FormData takes {uri, name, type}). */
@@ -35,7 +46,10 @@ export class Api {
   }
 
   private async json<T>(res: Response): Promise<T> {
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      const error = await res.json().catch(() => null);
+      throw new Error(typeof error?.detail === 'string' ? error.detail : `HTTP ${res.status}`);
+    }
     // 204 = the backend dropped this frame because Perceptron was still busy; callers get null
     if (res.status === 204) return null as T;
     return (await res.json()) as T;
@@ -55,6 +69,25 @@ export class Api {
 
   health = () => this.send<Health>('/api/health', {}, 4000);
   profile = () => this.send<Profile>('/api/profile', {}, 4000);
+  calibration = () => this.send<CalibrationStatus>('/api/calibration');
+  startCalibration = () => this.send<CalibrationStatus>('/api/calibration/start', { method: 'POST' });
+
+  finishCalibration(sessionId: string) {
+    return this.send<CalibrationStatus>('/api/calibration/finish', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+  }
+
+  calibrationFrame(frame: UploadFile, sessionId: string, sequence: number, capturedAt: string) {
+    const body = new FormData();
+    body.append('frame', filePart(frame));
+    body.append('session_id', sessionId);
+    body.append('sequence', String(sequence));
+    body.append('captured_at', capturedAt);
+    // Calibration surveys the place and then remembers objects: two full-client calls.
+    return this.send<CalibrationStatus>('/api/calibration/frame', { method: 'POST', body }, 40000);
+  }
 
   chat(text: string, history: ChatTurn[], currentRoom?: string) {
     return this.send<ChatResponse>('/api/chat', {
@@ -64,11 +97,11 @@ export class Api {
     }, 6000);
   }
 
-  observe(frame: UploadFile, room: string) {
+  observe(frame: UploadFile, room?: string, sessionId?: string) {
     const body = new FormData();
     body.append('frame', filePart(frame));
-    body.append('room', room);
-    return this.send<{ sightings: unknown[] } | null>('/api/observe', { method: 'POST', body });
+    for (const [key, value] of Object.entries(observationFields(room, sessionId))) body.append(key, value);
+    return this.send<{ sightings: unknown[] } | null>('/api/observe', { method: 'POST', body }, 20000);
   }
 
   guide(frame: UploadFile, item: string, yawDeg?: number | null) {
@@ -76,7 +109,7 @@ export class Api {
     body.append('frame', filePart(frame));
     body.append('item', item);
     if (typeof yawDeg === 'number') body.append('yaw_deg', String(yawDeg));
-    return this.send<GuideResponse | null>('/api/guide', { method: 'POST', body });
+    return this.send<GuideResponse | null>('/api/guide', { method: 'POST', body }, 40000);
   }
 
   /**

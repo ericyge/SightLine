@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Endpointer, encodeWav16k, levelDb, parseWakeMessage, PcmConverter, streamEncodingFor, toArrayBuffer, wakeUrl } from './wakeCore.ts';
 import { CameraWatchdog, SingleFlight, withTimeout } from './capture.ts';
+import { calibrationCommand, observationFields, observationSession, prepareLearningReply } from './calibration.ts';
 import { describeFirstFailure, describeLast, emptyStats, errorText, record, StageError, summarize } from './frameStats.ts';
 import { angleDiff, cameraHeading, compensate, panFromAngle, pitchBoost } from './guidance.ts';
 import { guideIntervalMs, waitMs } from './pacing.ts';
@@ -20,6 +21,23 @@ const samples = (wav) => {
   }
   return { left, right, view, frames };
 };
+
+test('calibration voice commands leave object queries for normal chat', () => {
+  assert.equal(calibrationCommand('Start calibration!'), 'start');
+  assert.equal(calibrationCommand('map my apartment'), 'start');
+  assert.equal(calibrationCommand('Continue mapping'), 'start');
+  assert.equal(calibrationCommand('finish calibration'), 'finish');
+  assert.equal(calibrationCommand('Stop mapping.'), 'finish');
+  assert.equal(calibrationCommand('find my wallet'), null);
+  assert.equal(calibrationCommand('stop'), null);
+});
+
+test('automatic room uploads omit room and include a valid independent session ID', () => {
+  const session = observationSession();
+  assert.match(session, /^[a-z0-9][a-z0-9_-]{0,79}$/);
+  assert.deepEqual(observationFields('', session), { session_id: session });
+  assert.deepEqual(observationFields('kitchen', session), { room: 'kitchen', session_id: session });
+});
 
 test('beep WAV header is stereo 16-bit PCM', () => {
   const wav = makeBeepWav(0, 660, 90, 22050);
@@ -652,4 +670,35 @@ test('wake: stream buffers are unwrapped from whatever the native module returne
   assert.deepEqual([...new Int16Array(out)], [2, 3]);
   assert.equal(toArrayBuffer('base64text'), null);
   assert.equal(toArrayBuffer(null), null);
+});
+
+test('background learning settles its frame before recall and continues for unknown items', async () => {
+  const calls = [];
+  let done;
+  const pending = new Promise((resolve) => { done = resolve; });
+  const reply = prepareLearningReply(pending,
+    async () => { calls.push('chat'); return { intent: 'where' }; },
+    async () => { calls.push('finish'); return true; });
+  assert.deepEqual(calls, []);
+  done();
+  assert.equal((await reply).intent, 'where');
+  assert.deepEqual(calls, ['chat']);
+});
+
+test('background learning is saved before navigation and retained on non-navigation requests', async () => {
+  for (const intent of ['find', 'where', 'stop', 'chitchat']) {
+    const calls = [];
+    const reply = await prepareLearningReply(null,
+      async () => { calls.push('chat'); return { intent }; },
+      async () => { calls.push('finish'); return true; });
+    calls.push(reply.intent);
+    assert.deepEqual(calls, intent === 'find' ? ['chat', 'finish', intent] : ['chat', intent]);
+  }
+});
+
+test('failed save cannot launch navigation; a failed frame still permits honest recall', async () => {
+  await assert.rejects(prepareLearningReply(null, async () => ({ intent: 'find' }), async () => false));
+  const reply = await prepareLearningReply(Promise.reject(new Error('frame failed')),
+    async () => ({ intent: 'where' }), async () => { throw new Error('must not finish'); });
+  assert.equal(reply.intent, 'where');
 });

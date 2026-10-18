@@ -25,7 +25,7 @@ def assign_keys(client, place_id="kitchen_counter"):
 def test_guide_navigate_speaks_next_hop(client, jpeg):
     teach(client)
     assign_keys(client)
-    headers = {"X-Mock-Hide": "1", "X-Mock-Place": "bedroom_door"}
+    headers = {"X-Mock-Facing": "aligned", "X-Mock-Hide": "1", "X-Mock-Place": "bedroom_door"}
     first = client.post("/api/guide", files=frame(jpeg), data={"item": "keys"}, headers=headers).json()
     assert first["mode"] == "navigate"
     assert first["found"] is False
@@ -42,10 +42,10 @@ def test_guide_navigate_advances_when_place_changes(client, jpeg):
     teach(client)
     assign_keys(client)
     r1 = client.post("/api/guide", files=frame(jpeg), data={"item": "keys"},
-                     headers={"X-Mock-Hide": "1", "X-Mock-Place": "bedroom_door"}).json()
+                     headers={"X-Mock-Facing": "aligned", "X-Mock-Hide": "1", "X-Mock-Place": "bedroom_door"}).json()
     assert "hallway" in r1["say"]
     r2 = client.post("/api/guide", files=frame(jpeg), data={"item": "keys"},
-                     headers={"X-Mock-Hide": "1", "X-Mock-Place": "kitchen_entry"}).json()
+                     headers={"X-Mock-Facing": "aligned", "X-Mock-Hide": "1", "X-Mock-Place": "kitchen_entry"}).json()
     assert r2["current_place"] == "kitchen_entry"
     assert r2["say"] == "Approach the counter beside the sink."
 
@@ -54,7 +54,7 @@ def test_guide_at_destination_without_item(client, jpeg):
     teach(client)
     assign_keys(client)
     r = client.post("/api/guide", files=frame(jpeg), data={"item": "keys"},
-                    headers={"X-Mock-Hide": "1", "X-Mock-Place": "kitchen_counter"}).json()
+                    headers={"X-Mock-Facing": "aligned", "X-Mock-Hide": "1", "X-Mock-Place": "kitchen_counter"}).json()
     assert r["mode"] == "navigate"
     assert r["current_place"] == "kitchen_counter"
     assert "Look around slowly" in r["say"]
