@@ -49,7 +49,7 @@ def _unknown(room, reason):
             "place_reason": reason}
 
 
-def _resolve(c, evidence, room, context, current):
+def _resolve(c, evidence, room, context, current, *, allow_concurrent_catalog=False):
     observed_room = room or (evidence.room if evidence else None) or UNKNOWN_ROOM
     if evidence is None or evidence.decision == "unknown":
         return _unknown(observed_room, evidence.reason if evidence else "Resting place could not be identified.")
@@ -73,10 +73,14 @@ def _resolve(c, evidence, room, context, current):
                 "place_reason": f"Inferred match using {len(matched)} stored landmarks. " + evidence.reason}
     if evidence.candidate_id or evidence.matched_landmarks or not evidence.name or not evidence.description:
         return _unknown(observed_room, "New place evidence is incomplete or contradictory.")
-    if not context["catalog_complete"] or set(current) != set(candidates):
+    if not context["catalog_complete"] or (not allow_concurrent_catalog and set(current) != set(candidates)):
         return _unknown(observed_room, "Place catalog was incomplete or changed; no new place was created.")
-    if any(len(landmarks & _landmarks(p)) >= 2 for p in current.values()):
-        return _unknown(observed_room, "These landmarks may describe an existing place; waiting for a clear match.")
+    for p in current.values():
+        if len(landmarks & _landmarks(p)) >= 2 or (allow_concurrent_catalog and _normalized(p["name"]) == _normalized(evidence.name)):
+            if allow_concurrent_catalog:
+                return {"place_id": p["id"], "room": p["room"], "place_source": "automatic",
+                        "place_reason": "Matched concurrently discovered place by landmarks/name. " + evidence.reason}
+            return _unknown(observed_room, "These landmarks may describe an existing place; waiting for a clear match.")
     place_id = "auto_" + uuid.uuid4().hex
     c.execute("INSERT INTO places(id,name,room,description,landmarks) VALUES (?,?,?,?,?)",
               (place_id, evidence.name, observed_room, evidence.description, json.dumps(evidence.landmarks)))
@@ -84,7 +88,7 @@ def _resolve(c, evidence, room, context, current):
             "place_reason": "New inferred place from visible landmarks. " + evidence.reason}
 
 
-def resolve_frame(c, detections, room, context):
+def resolve_frame(c, detections, room, context, *, allow_concurrent_catalog=False):
     """Reject conflicting claims within a frame instead of silently merging surfaces."""
     current = {r["id"]: memory._place(r) for r in c.execute("SELECT * FROM places")}
     if room:
@@ -108,7 +112,7 @@ def resolve_frame(c, detections, room, context):
                             (e.decision == evidence.decision == "new" and
                              _landmarks(e.model_dump()) == _landmarks(evidence.model_dump())) for e in others)
         result = (_unknown(room, "Conflicting place descriptions within this frame.") if conflict
-                  else _resolve(c, evidence, room, context, current))
+                  else _resolve(c, evidence, room, context, current, allow_concurrent_catalog=allow_concurrent_catalog))
         for d in group:
             results[d.item] = result
     return results
@@ -141,7 +145,7 @@ def refresh_repeat(c, item, assignment, spot, box, confidence, ts, session_id):
     return db.sighting_record(c.execute("SELECT * FROM sightings WHERE id=?", (row["id"],)).fetchone())
 
 
-def observe_and_save(vision, frame, room, ts, *, place_id=None, auto_place=True, session_id=None, hints=None, coalesce=False):
+def observe_and_save(vision, frame, room, ts, *, place_id=None, auto_place=True, session_id=None, hints=None, coalesce=False, allow_concurrent_catalog=False):
     """One inference call; atomically save new places and sightings; persist only object crops."""
     room = room.strip() if room and room.strip() else None
     explicit = memory.validate_place(place_id, room)
@@ -158,7 +162,7 @@ def observe_and_save(vision, frame, room, ts, *, place_id=None, auto_place=True,
     try:
         with db.connect() as c:
             c.execute("BEGIN IMMEDIATE")
-            assignments = resolve_frame(c, detections, room, context) if context is not None else {}
+            assignments = resolve_frame(c, detections, room, context, allow_concurrent_catalog=allow_concurrent_catalog) if context is not None else {}
             sightings = []
             for d in detections:
                 item_name = db.canonicalize_item(d.item) or d.item

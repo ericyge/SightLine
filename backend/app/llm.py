@@ -108,7 +108,9 @@ _STOP = re.compile(
     r"that'?s enough|"
     r"all good|i'?m good|"
     r"done|"
-    r"(?:i(?:'ve| have)? )?(?:got|found|have|grabbed|reached|picked up) (?:it|them|that|the [a-z0-9 ]+|my [a-z0-9 ]+)"
+    r"(?:i(?:'ve| have|'m| am)? )?(?:got|found|have|grabbed|reached|picked up|holding) "
+    r"(?:it|them|that|em|(?:the|my|a|an) [a-z0-9 ]+)|"
+    r"(?:i(?:'ve| have|'m| am)? )?(?:got|found|grabbed|picked up) [a-z0-9 ]+"
     r")\b"
 )
 _ROOM = re.compile(r"\b(?:i'?m|i am|we'?re|we are) (?:now )?in (?:the |my )?([a-z ]+)$")

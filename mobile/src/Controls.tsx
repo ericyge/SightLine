@@ -60,6 +60,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   const [wakeOn, setWakeOn] = useState(true);                   // the user's switch
   const [wakeBusy, setWakeBusy] = useState(false);              // handling a wake request, or its reply is playing
   const [speechBusy, setSpeechBusy] = useState(false);          // TTS/spoken cue playing (wake must yield the mic)
+  const speechHoldRef = useRef(0);                              // >0 while a reply or guidance cue is actively speaking
   const hushBeeps = useRef(false);                              // true while wake or speech owns the audio session
   const [rooms, setRooms] = useState<string[]>(['bedroom', 'kitchen', 'living room']);
   const [room, setRoom] = useState('');  // Automatic: never constrain a walk to the first profile room.
@@ -148,17 +149,26 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
         calibrationRef.current = restored;
         calibrationSequence.current = restored.last_sequence;
         setCalibration(restored);
-        setStatus(restored.status === 'mapping'
-          ? 'Learning in the background. Say Hey Jarvis, then ask about an object.'
-          : 'Ready. Apartment learning needs the full Perceptron mode.');
-        if (restored.status === 'mapping' && !(health.stt === 'elevenlabs' && Boolean(health.wake))) {
-          void voice.cue(
-            'I’ll remember objects as you move. Hold to talk needs the speech key; prefer Hey Jarvis when wake is on.');
+        // Blind-first: announce readiness out loud. Screen text is for helpers only.
+        const wakeReady = health.stt === 'elevenlabs' && Boolean(health.wake);
+        let readySay: string;
+        if (restored.status === 'mapping' && wakeReady) {
+          readySay = 'Connected. I am learning your space. Say Hey Jarvis, then ask about an object.';
+        } else if (restored.status === 'mapping') {
+          readySay = 'Connected and learning, but Hey Jarvis is not available. Check the speech and wake settings on the server.';
+        } else if (wakeReady) {
+          readySay = 'Connected. Apartment learning needs full Perceptron mode. Say Hey Jarvis when you are ready.';
+        } else {
+          readySay = 'Connected, but voice control is not ready. Check speech and wake settings on the server.';
         }
+        setStatus(readySay);
+        void voice.reply(readySay);
       } catch {
         if (cancelled) return;
         setConnected(false);
-        setStatus(`Cannot reach ${server}. Same Wi-Fi? Is the backend running?`);
+        const fail = 'Cannot reach the server. Check that the phone and laptop are on the same Wi-Fi, and that the backend is running.';
+        setStatus(fail);
+        void voice.reply(fail);
       }
     })();
     return () => { cancelled = true; };
@@ -198,11 +208,15 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     }
   }, [watchdog, flight, onRestartCamera]);
 
-  // Memory: about one frame a second to /api/observe while not guiding. Starts as soon as the backend
-  // connects and the camera is ready. Every outcome is counted so a failure shows up on screen.
+  // Memory: pipelined capture (~1 frame/s) while not guiding. Captures the photo and fires the upload
+  // without waiting for the previous HTTP response to return (up to 3 in flight), saving responses as they arrive.
   useEffect(() => {
     if (!connected || guiding) return;
     let cancelled = false;
+    const inFlight = new Set<Promise<unknown>>();
+    const syncPending = () => {
+      pendingFrame.current = inFlight.size ? Promise.allSettled([...inFlight]) : null;
+    };
     (async () => {
       while (!cancelled) {
         memBeat.current = Date.now();
@@ -210,18 +224,39 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
             || (calibrationRef.current?.status === 'idle' && !calibrationRef.current.places.length)) {
           await sleep(250); continue;
         }
+        if (inFlight.size >= 4) {
+          await Promise.race([...inFlight]).catch(() => undefined);
+          continue;
+        }
         const t0 = Date.now();
-        let result: Result;
-        let task: Promise<unknown> | null = null;
+        let frame: { uri: string; name: string; type: string };
         try {
-          task = (async () => {
-            const frame = await captureFrame();
-            if (cancelled) return null;
-            const active = calibrationRef.current;
-            if (active?.status === 'mapping' && active.session_id) {
-              const next = await api.calibrationFrame(frame, active.session_id,
-                ++calibrationSequence.current, new Date().toISOString());
-              if (!cancelled) {
+          frame = await captureFrame();
+        } catch (e) {
+          if (cancelled) break;
+          const failRes: Result = {
+            kind: 'failed', at: Date.now(), ms: Date.now() - t0, error: errorText(e),
+            stage: e instanceof StageError ? e.stage : 'camera',
+          };
+          setMemStats((st) => record(st, failRes));
+          afterAttempt(failRes);
+          await sleep(400);
+          continue;
+        }
+        if (cancelled) break;
+        const capturedAt = new Date().toISOString();
+        const active = calibrationRef.current;
+        const seq = active?.status === 'mapping' && active.session_id ? ++calibrationSequence.current : 0;
+        const sessionForFrame = active?.session_id;
+        const roomForFrame = roomRef.current;
+
+        const uploadTask = (async () => {
+          let result: Result;
+          try {
+            let r: unknown;
+            if (seq > 0 && sessionForFrame) {
+              const next = await api.calibrationFrame(frame, sessionForFrame, seq, capturedAt);
+              if (!cancelled && next.last_sequence >= (calibrationRef.current?.last_sequence ?? 0)) {
                 calibrationRef.current = next;
                 setCalibration(next);
                 if (next.memory_warning) {
@@ -233,34 +268,53 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
                 memoryWarned.current = !!next.memory_warning;
                 calibrationFailed.current = false;
               }
-              return next;
+              r = next;
+            } else {
+              r = await api.observe(frame, roomForFrame, sessionId);
             }
-            return api.observe(frame, roomRef.current, sessionId);
-          })();
-          pendingFrame.current = task;
-          const r = await task;
-          result = { kind: r ? 'ok' : 'dropped', at: Date.now(), ms: Date.now() - t0 };
-        } catch (e) {
-          if (!cancelled && calibrationRef.current?.status === 'mapping') {
-            setStatus(`Apartment learning failed: ${errorText(e)}. Still trying.`);
-            if (!calibrationFailed.current) void voice.cue('Apartment learning could not process this view. I’ll keep trying.');
-            calibrationFailed.current = true;
+            result = { kind: r ? 'ok' : 'dropped', at: Date.now(), ms: Date.now() - t0 };
+          } catch (e) {
+            if (!cancelled && calibrationRef.current?.status === 'mapping') {
+              setStatus(`Apartment learning failed: ${errorText(e)}. Still trying.`);
+              if (!calibrationFailed.current) void voice.cue('Apartment learning could not process this view. I’ll keep trying.');
+              calibrationFailed.current = true;
+            }
+            result = {
+              kind: 'failed', at: Date.now(), ms: Date.now() - t0, error: errorText(e),
+              stage: e instanceof StageError ? e.stage : 'upload',
+            };
           }
-          result = {
-            kind: 'failed', at: Date.now(), ms: Date.now() - t0, error: errorText(e),
-            stage: e instanceof StageError ? e.stage : 'upload',
-          };
-        } finally {
-          if (pendingFrame.current === task) pendingFrame.current = null;
-        }
-        if (cancelled) break;
-        setMemStats((st) => record(st, result));
-        afterAttempt(result);
-        await sleep(Math.max(0, (calibrationRef.current?.status === 'mapping' ? 2000 : LOOP_MS) - (Date.now() - t0)));
+          if (!cancelled) {
+            setMemStats((st) => record(st, result));
+            afterAttempt(result);
+          }
+        })();
+
+        inFlight.add(uploadTask);
+        syncPending();
+        void uploadTask.finally(() => {
+          inFlight.delete(uploadTask);
+          syncPending();
+        });
+
+        await sleep(Math.max(150, 550 - (Date.now() - t0)));
       }
     })();
     return () => { cancelled = true; };
   }, [api, connected, guiding, captureFrame, afterAttempt, sessionId]);
+
+  // ---- "Hey Jarvis": primary hands-free path (blind-first; hold-to-talk is backup only) ----
+  // iOS: AudioStream forces record-only mode while active. Yield the mic whenever TTS speech
+  // (`speechBusy`), a wake utterance (`wakeBusy`), or push-to-talk (`listening`) is active, and
+  // immediately re-arm "Hey Jarvis" in between guidance cues so the user can say
+  // "Hey Jarvis, I got the wallet" or "Hey Jarvis, stop" hands-free.
+  const wakeEnabled = (wakeAvailable && wakeOn && connected && stt === 'elevenlabs'
+    && !listening && !wakeBusy && !speechBusy);
+  // Beep loop and guidance cue queue read these refs so speech/wake state toggles do not
+  // remount the guidance effect or interrupt an active "Hey Jarvis, I got the [object]" capture.
+  const wakeEnabledRef = useRef(wakeEnabled);
+  useEffect(() => { wakeEnabledRef.current = wakeEnabled; }, [wakeEnabled]);
+  const voiceCaptureActiveRef = useRef(false);
 
   // Guidance: as fast as the backend answers, capped (GUIDE_MAX_FPS), one request in flight and never
   // queued; plus a fast local loop that plays the beeps and keeps the pan right between answers.
@@ -268,11 +322,50 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     if (!guiding) return;
     let cancelled = false;
     let guidanceFailed = false;
+    let activeCuePromise: Promise<void> | null = null;
+    let queuedCueText = '';
+
+    const releaseCueHold = () => {
+      speechHoldRef.current = Math.max(0, speechHoldRef.current - 1);
+      if (speechHoldRef.current === 0) setSpeechBusy(false);
+    };
+
+    const enqueueCue = (text: string) => {
+      if (voiceCaptureActiveRef.current) return;
+      queuedCueText = text;
+      if (activeCuePromise) return;
+      const drain = async () => {
+        speechHoldRef.current += 1;
+        setSpeechBusy(true);
+        try {
+          await sleep(120);
+          while (!cancelled && queuedCueText && !voiceCaptureActiveRef.current) {
+            const nextText = queuedCueText;
+            queuedCueText = '';
+            setCue(nextText);
+            // Cap so a hung TTS path cannot leave Hey Jarvis muted forever.
+            await Promise.race([voice.cue(nextText), sleep(12000)]);
+          }
+        } finally {
+          await sleep(350);
+          releaseCueHold();
+          activeCuePromise = null;
+          if (!cancelled && queuedCueText && !voiceCaptureActiveRef.current) {
+            activeCuePromise = drain();
+          }
+        }
+      };
+      activeCuePromise = drain();
+    };
+
     // Guarantee iOS playback mode so 3D spatial beeps and voice cues are never silenced by record-only mode.
     void setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false }).catch(() => {});
     (async () => {
       while (!cancelled) {
-        if (testing || calibrationActionRef.current || !cameraUsable()) { await sleep(250); continue; }
+        if (testing || calibrationActionRef.current || voiceCaptureActiveRef.current || !cameraUsable()) {
+          await sleep(250);
+          continue;
+        }
         const t0 = Date.now();
         let result: Result;
         try {
@@ -280,20 +373,12 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
           const r = await api.guide(await captureFrame(), guiding, yaw);
           if (cancelled) break;
           // null = 204: the backend dropped this frame (still busy). Keep the last result.
-          if (r) {
+          if (r && !voiceCaptureActiveRef.current) {
             guideRef.current = { last: r, yawAtLast: yaw, at: Date.now() };
             const spoken = r.say || (guidanceFailed ? r.next_instruction || 'Camera updates have resumed.' : '');
             if (spoken) {
               setCue(spoken);
-              // Yield Hey Jarvis mic so iOS can play the cue over loudspeaker, then wait 350ms
-              // for speaker echo to decay before re-arming the wake mic.
-              setSpeechBusy(true);
-              try {
-                await sleep(80);
-                await voice.cue(spoken);
-              } finally {
-                await sleep(350);
-              }
+              enqueueCue(spoken);
             }
             guidanceFailed = false;
           }
@@ -324,7 +409,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
         // otherwise `playBeep` and `AudioStream` fight over AVAudioSession (OSStatus 561017449)
         // and kill the "Hey Jarvis" microphone stream.
         const { last, yawAtLast, at } = guideRef.current;
-        if (hushBeeps.current || wakeEnabled || last?.distance === 'reach') { await sleep(100); continue; }
+        if (hushBeeps.current || wakeEnabledRef.current || last?.distance === 'reach') { await sleep(100); continue; }
         if (last?.found && last.angle != null && Date.now() - at < STALE_MS) {
           // Between vision updates, keep the pan right as the phone turns.
           const angle = compensate(last.angle, getYaw(), yawAtLast);
@@ -335,16 +420,23 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
         }
       }
     })();
-    return () => { cancelled = true; guideRef.current = { last: null, yawAtLast: null, at: 0 }; };
-  }, [api, guiding, wakeEnabled, captureFrame, afterAttempt]);
+    return () => {
+      cancelled = true;
+      queuedCueText = '';
+      guideRef.current = { last: null, yawAtLast: null, at: 0 };
+      // Drop any cue hold so stopping guidance always re-arms Hey Jarvis.
+      speechHoldRef.current = 0;
+      setSpeechBusy(false);
+    };
+  }, [api, guiding, captureFrame, afterAttempt]);
 
   // Poll spoken output so wake can release the mic while replies/cues play (iOS record-only conflict).
   useEffect(() => {
-    if (!connected) { setSpeechBusy(false); return; }
+    if (!connected) { speechHoldRef.current = 0; setSpeechBusy(false); return; }
     let cancelled = false;
     (async () => {
       while (!cancelled) {
-        const busy = (await Speech.isSpeakingAsync()) || isVoicePlaying();
+        const busy = speechHoldRef.current > 0 || (await Speech.isSpeakingAsync()) || isVoicePlaying();
         if (!cancelled) setSpeechBusy(busy);
         await sleep(200);
       }
@@ -371,29 +463,43 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     }
   }
 
-  const stopGuidance = useCallback(() => {
+  const stopGuidance = useCallback(async (say?: unknown) => {
+    const spoken = typeof say === 'string' && say ? say : 'Stopped.';
+    voiceCaptureActiveRef.current = false;
     setGuiding(null);
     setCue('');
     setStatus('Guidance stopped.');
-    void voice.cue('Stopped.');
+    speechHoldRef.current += 1;
+    setSpeechBusy(true);
+    try {
+      await Promise.race([voice.reply(spoken), sleep(10000)]);
+    } finally {
+      await sleep(300);
+      speechHoldRef.current = Math.max(0, speechHoldRef.current - 1);
+      if (speechHoldRef.current === 0) setSpeechBusy(false);
+    }
   }, []);
 
   const apply = useCallback(async (r: ChatResponse) => {
     history.current = [...history.current, { role: 'assistant' as const, content: r.say.slice(0, 500) }]
       .slice(-HISTORY_TURNS);
-    if (r.intent === 'stop') return stopGuidance();
-    if (r.intent === 'find' && r.item) {
-      setGuiding(r.item);
-      pausedRef.current = false; // Let /api/guide start localizing while the initial reply speaks.
-    }
+    if (r.intent === 'stop') return stopGuidance(r.say || 'Stopped.');
     if (r.intent === 'where') { setGuiding(null); setCue(''); }
     if (r.intent === 'set_room' && r.room) setRoom(r.room);
     setStatus(r.say);
+    speechHoldRef.current += 1;
     setSpeechBusy(true);
     try {
-      await voice.reply(r.say);   // ElevenLabs voice when enabled, built-in voice on any failure
+      // Cap so a hung TTS path cannot leave Hey Jarvis muted forever.
+      await Promise.race([voice.reply(r.say), sleep(15000)]);
     } finally {
-      await sleep(400);           // let room echo decay before re-arming the wake mic
+      if (r.intent === 'find' && r.item) {
+        setGuiding(r.item);
+        pausedRef.current = false; // Start guidance loop cleanly right after the initial reply finishes speaking.
+      }
+      await sleep(300);           // let room echo decay before re-arming the wake mic
+      speechHoldRef.current = Math.max(0, speechHoldRef.current - 1);
+      if (speechHoldRef.current === 0) setSpeechBusy(false);
     }
   }, [stopGuidance]);
 
@@ -463,14 +569,6 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     }
   }, [api, apply, changeCalibration]);
 
-  // ---- "Hey Jarvis": primary hands-free path (blind-first; hold-to-talk is backup only) ----
-  // iOS: AudioStream forces record-only mode while active. Yield the mic whenever TTS speech
-  // (`speechBusy`), a wake utterance (`wakeBusy`), or push-to-talk (`listening`) is active, and
-  // immediately re-arm "Hey Jarvis" in between guidance cues so the user can say
-  // "Hey Jarvis, I got the wallet" or "Hey Jarvis, stop" hands-free.
-  const wakeEnabled = (wakeAvailable && wakeOn && connected && stt === 'elevenlabs'
-    && !listening && !wakeBusy && !speechBusy);
-
   /** Wait until the spoken reply has finished, so the microphone stream does not cut it off. */
   const waitUntilQuiet = useCallback(async () => {
     await sleep(500);   // let the reply start
@@ -487,7 +585,9 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     setWakeBusy(true);   // turns the stream off and restores the speaker before anything is played
     try {
       if (reason === 'no-speech') {
-        setStatus("I didn't hear a request. Say Hey Jarvis again.");
+        const say = "I didn't hear a request. Say Hey Jarvis again.";
+        setStatus(say);
+        void voice.reply(say);
         return;
       }
       setStatus('Thinking…');
@@ -496,13 +596,17 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
       file.write(wav);
       const { text } = await api.transcribe({ uri: file.uri, name: 'request.wav', type: 'audio/wav' });
       if (!text) {
-        setStatus("I didn't catch that. Say Hey Jarvis again.");
+        const say = "I didn't catch that. Say Hey Jarvis again.";
+        setStatus(say);
+        void voice.reply(say);
         return;
       }
       await runCommand(text);
       await waitUntilQuiet();
     } catch {
-      setStatus('Speech service unavailable. Say Hey Jarvis again, or type your request.');
+      const say = 'Speech service unavailable. Say Hey Jarvis again in a moment.';
+      setStatus(say);
+      void voice.reply(say);
     } finally {
       setWakeBusy(false);
     }
@@ -511,17 +615,22 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   const wake = useWake({
     enabled: wakeEnabled,
     server,
-    onWake: () => { Vibration.vibrate(150); setStatus('Listening…'); },   // a buzz: nothing can play while listening
+    onWake: () => {
+      voiceCaptureActiveRef.current = true;
+      Vibration.vibrate(150);
+      setStatus('Listening…');
+    },   // a buzz: nothing can play while listening
     onUtterance: (wav, reason) => { void handleWakeRequest(wav, reason); },
   });
 
   useEffect(() => {
+    voiceCaptureActiveRef.current = wakeBusy || listening || commandBusy || wake.state === 'capturing';
     // Hush beeps while capturing a command, while TTS owns the speaker, or when the item is in
     // reach ("Stop. Reach straight in front of you now") so the mic stays open in record mode for
     // "Hey Jarvis, I got the wallet" without playBeep fighting AVAudioSession.
     const reached = guideRef.current.last?.distance === 'reach';
     hushBeeps.current = speechBusy || wakeBusy || listening || wake.state === 'capturing' || reached;
-  }, [speechBusy, wakeBusy, listening, wake.state]);
+  }, [speechBusy, wakeBusy, listening, commandBusy, wake.state]);
 
   const wakeLine = ((): { text: string; bad: boolean } => {
     if (!wakeAvailable) return { text: 'not available on the server (WAKE_ENABLED=true and the wake packages/models)', bad: true };
@@ -546,12 +655,22 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     voice.stop();   // silence every voice: do not talk over the user
     const ready = (async () => {
       const perm = await requestRecordingPermissionsAsync();
-      if (!perm.granted) { setStatus('Microphone permission is needed to talk.'); return false; }
+      if (!perm.granted) {
+        const say = 'Microphone permission is needed. Enable the microphone in Settings, then say Hey Jarvis.';
+        setStatus(say);
+        void voice.reply(say);
+        return false;
+      }
       await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true });
       await recorder.prepareToRecordAsync();
       recorder.record();
       return true;
-    })().catch(() => { setStatus('Microphone unavailable.'); return false; });
+    })().catch(() => {
+      const say = 'Microphone unavailable. Check phone settings, then say Hey Jarvis again.';
+      setStatus(say);
+      void voice.reply(say);
+      return false;
+    });
     recording.current = { ready, startedAt: Date.now() };
   }
 
@@ -566,18 +685,24 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
       await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: false });
       setListening(false);
       if (Date.now() - current.startedAt < MIN_HOLD_MS || !recorder.uri) {
-        setStatus('Hold the button while you speak.');
-        return void voice.reply('Hold the button while you speak.');
+        const say = 'I need a longer request. Say Hey Jarvis, then speak your request.';
+        setStatus(say);
+        return void voice.reply(say);
       }
       setStatus('Thinking…');
       // m4a/AAC from expo-audio's preset. UNVERIFIED that ElevenLabs accepts it (docs say "all major formats").
       const { text } = await api.transcribe({ uri: recorder.uri, name: 'recording.m4a', type: 'audio/mp4' });
-      if (!text) { setStatus("I didn't hear anything. Try again."); return void voice.reply("I didn't hear anything. Try again."); }
+      if (!text) {
+        const say = "I didn't hear anything. Say Hey Jarvis again.";
+        setStatus(say);
+        return void voice.reply(say);
+      }
       await runCommand(text);
     } catch {
       setListening(false);
-      setStatus('Speech service unavailable. Type your request instead.');
-      void voice.reply('Speech service unavailable. Type your request instead.');
+      const say = 'Speech service unavailable. Say Hey Jarvis again in a moment.';
+      setStatus(say);
+      void voice.reply(say);
     }
   }
 
@@ -713,30 +838,32 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
       </ScrollView>
 
       <View style={styles.bottom}>
-        {stt !== 'elevenlabs' && (
-          <View style={styles.settings}>
+        {/* Sighted-helper fallbacks only. Blind users: Hey Jarvis is the only supported path. */}
+        {showDebug && stt !== 'elevenlabs' && (
+          <View style={styles.settings} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
             <TextInput value={typed} onChangeText={setTyped} onSubmitEditing={submitTyped} returnKeyType="send"
               placeholder="where's my wallet" placeholderTextColor="#999"
-              accessibilityLabel="Type a request" style={styles.input} />
+              accessibilityLabel="Type a request (helper only)" style={styles.input} />
             <Pressable onPress={submitTyped} accessibilityRole="button" accessibilityLabel="Send" style={styles.small}>
               <Text style={styles.smallText}>Send</Text>
             </Pressable>
           </View>
         )}
-        {guiding && (
+        {showDebug && guiding && (
           <Pressable onPress={stopGuidance} accessibilityRole="button" accessibilityLabel="Stop guidance"
             accessibilityHint="Or say Hey Jarvis, then stop"
             style={styles.stop}>
             <Text style={styles.stopText}>Stop</Text>
           </Pressable>
         )}
-        {/* Backup only — primary input is Hey Jarvis (blind-first). */}
-        <Pressable onPressIn={beginTalk} onPressOut={endTalk} disabled={stt !== 'elevenlabs'}
-          accessibilityRole="button" accessibilityLabel="Hold to talk backup"
-          accessibilityHint="Backup if Hey Jarvis is unavailable. Prefer saying Hey Jarvis."
-          style={[styles.talkBackup, listening && styles.talkOn, stt !== 'elevenlabs' && styles.talkOff]}>
-          <Text style={styles.backupText}>{listening ? 'Listening…' : 'Hold to talk (backup)'}</Text>
-        </Pressable>
+        {showDebug && (
+          <Pressable onPressIn={beginTalk} onPressOut={endTalk} disabled={stt !== 'elevenlabs'}
+            accessibilityRole="button" accessibilityLabel="Hold to talk helper backup"
+            accessibilityHint="Helper only. Blind users should say Hey Jarvis."
+            style={[styles.talkBackup, listening && styles.talkOn, stt !== 'elevenlabs' && styles.talkOff]}>
+            <Text style={styles.backupText}>{listening ? 'Listening…' : 'Hold to talk (helper)'}</Text>
+          </Pressable>
+        )}
       </View>
     </View>
   );

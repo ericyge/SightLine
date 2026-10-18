@@ -127,6 +127,7 @@ class GuideState:
     last_angle: float | None = None
     yaw_at_last: float | None = None    # the phone's heading when the item was last seen (degrees, may be None)
     last_key: str | None = None
+    last_spoken_at: float = 0.0
     touched: float = 0.0
 
 

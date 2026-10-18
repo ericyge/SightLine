@@ -154,10 +154,18 @@ def _guide_payload(*, found: bool, say: str = "", beep_ms: int = 0, mode: str = 
             "next_instruction": next_instruction, "departure_status": departure_status}
 
 
-def _nav_say(nav: guidance.NavigateState, text: str, key: str, now: float) -> str:
-    """Speak a navigate cue on change, or re-prompt the same cue after NAVIGATE_REPEAT_S."""
+LIVE_REPEAT_S = 10.0      # re-speak an unchanged instruction after 10s
+LIVE_MIN_CUE_GAP_S = 5.5  # minimum cooldown between different spoken cues in real live mode
+
+
+def _nav_say(nav: guidance.NavigateState, text: str, key: str, now: float,
+             repeat_s: float = guidance.NAVIGATE_REPEAT_S, min_gap_s: float = 0.0) -> str:
+    """Speak a navigate cue on change (after min_gap_s), or re-prompt the same cue after repeat_s."""
+    if min_gap_s > 0 and nav.last_spoken_at > 0 and (now - nav.last_spoken_at) < min_gap_s:
+        if not key.endswith(":blocked"):
+            return ""
     spoken, nav.last_key, nav.last_spoken_at = guidance.navigate_say(
-        text, key, nav.last_key, now=now, last_spoken_at=nav.last_spoken_at)
+        text, key, nav.last_key, now=now, last_spoken_at=nav.last_spoken_at, repeat_s=repeat_s)
     return spoken
 
 
@@ -177,14 +185,16 @@ def _body_relative_hop_cue(hop_instruction: str, facing: str) -> str:
     if facing == "blocked":
         return "Stop walking. Something is blocking the path ahead. Step or turn to the side."
     if facing == "left":
-        return "Turn left in place, then walk straight ahead."
+        return "Stop walking. Turn left in place until you face the path ahead."
     if facing == "right":
-        return "Turn right in place, then walk straight ahead."
+        return "Stop walking. Turn right in place until you face the path ahead."
+    if facing == "aligned":
+        if _is_body_relative(hop_instruction):
+            return hop_instruction
+        return "Walk straight ahead a few steps."
     if _is_body_relative(hop_instruction):
         return hop_instruction
-    if facing == "aligned":
-        return "Walk straight ahead a few steps."
-    return "Turn slowly right in place, or walk straight ahead if the path is clear."
+    return "Stop walking. Turn slowly right in place until you face the path ahead."
 
 
 def _body_relative_arrival_cue(facing: str, history: list[dict]) -> str:
@@ -236,36 +246,12 @@ def _body_relative_visual_cue(angle: float | None, distance: str | None) -> str:
     return "Turn right."
 
 
-def _navigate_guide(name: str, frame: bytes, hints: dict, now: float, yaw: float | None = None) -> dict:
-    """Room-to-room cue when the target item is not visible in this frame."""
-    history = db.recent_sightings(name, 1)
-    saved_map = memory.get_map()
-    places = saved_map["places"]
-    destination = memory.navigable_destination(name)
-    nav = _nav_state(name, now)
-    real_live = not get_vision().mock and not hints
-    if destination is None:
-        if history:
-            cue = (
-                "Stop walking. Turn slowly right in place with your phone in front of you."
-                if real_live
-                else f"I last saw your {name}, but couldn't identify its place. Please slowly scan your surroundings."
-            )
-            text = _nav_say(nav, cue, f"unassigned:{history[0]['id']}", now)
-            return _guide_payload(found=False, say=text, mode="lost")
-        nav.last_key = None
-        state = _guide_states.get(name)
-        if state is None or now - state.touched > GUIDE_STATE_TTL_S:
-            state = _guide_states[name] = guidance.GuideState(since=now)
-        result = guidance.compute_guide(name, None, state, db.guidance_style(), fov_h(), now, yaw)
-        return _guide_payload(found=False, say=result["say"], mode="lost")
-
-    # Check facing in the localization request: still two provider calls per guide frame.
+def _localization_candidates(places: list[dict], destination: dict, connections: list[dict], real_live: bool) -> list[dict]:
     candidates = []
     dest_lms = ", ".join(destination.get("landmarks", [])[:3])
     dest_dep_view = f"Centered directly in front of {destination['name']}" + (f" ({dest_lms})" if dest_lms else "")
     for place in places:
-        route = memory.plan_route(place["id"], destination["id"], saved_map["connections"], places)
+        route = memory.plan_route(place["id"], destination["id"], connections, places)
         hop = route.next_hop
         if hop and hop.departure_view.strip():
             departure = {"to_place_id": hop.to_place_id, "departure_view": hop.departure_view}
@@ -274,8 +260,42 @@ def _navigate_guide(name: str, frame: bytes, hints: dict, now: float, yaw: float
         else:
             departure = None
         candidates.append({**place, "departure": departure})
+    return candidates
+
+
+def _navigate_guide(name: str, frame: bytes, hints: dict, now: float, yaw: float | None = None,
+                    loc_future=None) -> dict:
+    """Room-to-room cue when the target item is not visible in this frame."""
+    history = db.recent_sightings(name, 1)
+    saved_map = memory.get_map()
+    places = saved_map["places"]
+    destination = memory.navigable_destination(name)
+    nav = _nav_state(name, now)
+    vis_state = _guide_states.get(name)
+    if vis_state and vis_state.last_spoken_at > nav.last_spoken_at:
+        nav.last_spoken_at = vis_state.last_spoken_at
+    real_live = not get_vision().mock and not hints
+    repeat_s = LIVE_REPEAT_S if real_live else guidance.NAVIGATE_REPEAT_S
+    min_gap_s = LIVE_MIN_CUE_GAP_S if real_live else 0.0
+    if destination is None:
+        if history:
+            cue = (
+                "Stop walking. Turn slowly right in place with your phone in front of you."
+                if real_live
+                else f"I last saw your {name}, but couldn't identify its place. Please slowly scan your surroundings."
+            )
+            text = _nav_say(nav, cue, f"unassigned:{history[0]['id']}", now, repeat_s=repeat_s, min_gap_s=min_gap_s)
+            return _guide_payload(found=False, say=text, mode="lost")
+        nav.last_key = None
+        state = _guide_states.get(name)
+        if state is None or now - state.touched > GUIDE_STATE_TTL_S:
+            state = _guide_states[name] = guidance.GuideState(since=now)
+        result = guidance.compute_guide(name, None, state, db.guidance_style(), fov_h(), now, yaw)
+        return _guide_payload(found=False, say=result["say"], mode="lost")
+
+    candidates = _localization_candidates(places, destination, saved_map["connections"], real_live)
     try:
-        loc = get_vision().localize(frame, candidates, hints)
+        loc = loc_future.result() if loc_future is not None else get_vision().localize(frame, candidates, hints)
     except VisionUnavailable:
         nav.last_key = None  # Repeat the instruction after recovery from a failed check.
         nav.last_spoken_at = 0.0
@@ -284,19 +304,26 @@ def _navigate_guide(name: str, frame: bytes, hints: dict, now: float, yaw: float
     if current_id is not None:
         nav.last_place_id = current_id
         nav.last_place_at = now
-    elif real_live and nav.last_place_id and (now - nav.last_place_at) <= 15.0:
-        current_id = nav.last_place_id
+    elif real_live:
+        if nav.last_place_id and (now - nav.last_place_at) <= 3.5:
+            current_id = nav.last_place_id
+        elif nav.last_place_id is None:
+            seeded = calibration.last_known_place_id()
+            if seeded:
+                current_id = nav.last_place_id = seeded
+                nav.last_place_at = now
     plan = memory.plan_route(current_id, destination["id"], saved_map["connections"], places)
 
     if plan.status == "already_there":
         if real_live:
             cue = _body_relative_arrival_cue(loc.departure_status, history)
-            text = _nav_say(nav, cue, f"at:{destination['id']}:{loc.departure_status}", now)
+            text = _nav_say(nav, cue, f"at:{destination['id']}:{loc.departure_status}", now,
+                            repeat_s=repeat_s, min_gap_s=min_gap_s)
             return _guide_payload(found=False, say=text, mode="navigate",
                                   current_place=current_id, destination=destination,
                                   next_instruction=cue, departure_status=loc.departure_status)
         text = _nav_say(nav, f"You're at {destination['name']}. Look around slowly.",
-                        f"at:{destination['id']}", now)
+                        f"at:{destination['id']}", now, repeat_s=repeat_s)
         return _guide_payload(found=False, say=text, mode="navigate",
                               current_place=current_id, destination=destination,
                               next_instruction=None)
@@ -308,7 +335,7 @@ def _navigate_guide(name: str, frame: bytes, hints: dict, now: float, yaw: float
         if real_live:
             spoken_instruction = _body_relative_hop_cue(hop.instruction, facing)
             key = f"{key}:{facing}:{spoken_instruction}"
-            text = _nav_say(nav, spoken_instruction, key, now)
+            text = _nav_say(nav, spoken_instruction, key, now, repeat_s=repeat_s, min_gap_s=min_gap_s)
             return _guide_payload(found=False, say=text, mode="navigate",
                                   current_place=current_id, destination=destination,
                                   next_instruction=spoken_instruction if facing != "blocked" else None,
@@ -319,27 +346,27 @@ def _navigate_guide(name: str, frame: bytes, hints: dict, now: float, yaw: float
                 "right": "Pause walking. Turn slowly right in place so I can check the route.",
                 "blocked": "Stop. The route appears blocked. Keep still while I check again.",
             }.get(facing, "Pause walking. Slowly scan in place so I can check which way you're facing.")
-            text = _nav_say(nav, cue, f"{key}:{facing}", now)
+            text = _nav_say(nav, cue, f"{key}:{facing}", now, repeat_s=repeat_s)
             return _guide_payload(found=False, say=text, mode="navigate",
                                   current_place=current_id, destination=destination,
                                   departure_status=facing)
         key = f"{key}:aligned:{hop.instruction}"
-        text = _nav_say(nav, hop.instruction, key, now)
+        text = _nav_say(nav, hop.instruction, key, now, repeat_s=repeat_s)
         return _guide_payload(found=False, say=text, mode="navigate",
                               current_place=current_id, destination=destination,
                               next_instruction=hop.instruction, departure_status="aligned")
 
     if plan.status == "unknown_current":
         if real_live:
-            cue = "Stop walking. Turn slowly right in place with your phone pointed ahead."
-            text = _nav_say(nav, cue, f"noloc:{destination['id']}", now)
+            cue = "Stop walking. Turn slowly right in place so I can check where you are."
+            text = _nav_say(nav, cue, f"noloc:{destination['id']}", now, repeat_s=repeat_s, min_gap_s=min_gap_s)
             return _guide_payload(found=False, say=text, mode="navigate",
                                   current_place=None, destination=destination,
                                   next_instruction=cue)
         text = _nav_say(
             nav,
             f"Pause walking. Last seen at {destination['name']}, but I can't tell where you are yet. Please slowly scan your surroundings.",
-            f"noloc:{destination['id']}", now)
+            f"noloc:{destination['id']}", now, repeat_s=repeat_s)
         return _guide_payload(found=False, say=text, mode="lost",
                               current_place=None, destination=destination)
 
@@ -347,7 +374,8 @@ def _navigate_guide(name: str, frame: bytes, hints: dict, now: float, yaw: float
         cur_place = memory.get_place(current_id)
         if real_live and cur_place:
             cue = _body_relative_hop_cue("", loc.departure_status)
-            text = _nav_say(nav, cue, f"nopath:{current_id}:{destination['id']}:{loc.departure_status}", now)
+            text = _nav_say(nav, cue, f"nopath:{current_id}:{destination['id']}:{loc.departure_status}", now,
+                            repeat_s=repeat_s, min_gap_s=min_gap_s)
             return _guide_payload(found=False, say=text, mode="navigate",
                                   current_place=current_id, destination=destination,
                                   next_instruction=cue, departure_status=loc.departure_status)
@@ -520,6 +548,14 @@ async def guide(request: Request, frame: UploadFile = File(...), item: str = For
     hints = _mock_hints(request)
     # Hide overrides other mock detect hints so navigate can be tested without the item in frame.
     detect_hints = {k: v for k, v in hints.items() if k not in {"place", "facing"}}
+    real_live = not vision.mock and not hints
+    loc_future = None
+    if real_live and vision.mode == "perceptron":
+        dest_for_loc = memory.navigable_destination(name)
+        if dest_for_loc is not None:
+            saved_map = memory.get_map()
+            cands = _localization_candidates(saved_map["places"], dest_for_loc, saved_map["connections"], True)
+            loc_future = calibration._pool.submit(vision.localize, data, cands, hints)
     if vision.mock and not target["watched"] and not detect_hints and not db.recent_sightings(name, 1):
         detections = []
     else:
@@ -530,20 +566,33 @@ async def guide(request: Request, frame: UploadFile = File(...), item: str = For
     box = next((d.box for d in detections if (db.canonicalize_item(d.item) or d.item) == name), None)
     now = time.monotonic()
     if box is None:
-        result = await run_in_threadpool(_navigate_guide, name, data, hints, now, yaw_deg)
+        result = await run_in_threadpool(_navigate_guide, name, data, hints, now, yaw_deg, loc_future)
     else:
-        _navigate_states.pop(name, None)
+        nav_prev = _navigate_states.get(name)
         state = _guide_states.get(name)
         if state is None or now - state.touched > GUIDE_STATE_TTL_S:
             state = _guide_states[name] = guidance.GuideState(since=now)
+        if nav_prev and nav_prev.last_spoken_at > state.last_spoken_at:
+            state.last_spoken_at = nav_prev.last_spoken_at
+        prev_vis_key = state.last_key
         # yaw_deg (the phone's heading) is remembered so a later "Lost it" cue can point the shorter way;
         # beep panning between updates is still compensated in the apps.
         result = guidance.compute_guide(name, box, state, db.guidance_style(), fov_h(), now, yaw_deg)
-        if not vision.mock and not hints and result.get("say"):
-            result["say"] = _body_relative_visual_cue(result.get("angle"), result.get("distance"))
+        if not vision.mock and not hints:
+            cue = _body_relative_visual_cue(result.get("angle"), result.get("distance"))
+            vis_key = f"vis:{cue}"
+            is_new_reach = result.get("distance") == "reach" and prev_vis_key != vis_key
+            if not is_new_reach and state.last_spoken_at > 0 and (now - state.last_spoken_at) < LIVE_MIN_CUE_GAP_S:
+                spoken = ""
+                state.last_key = prev_vis_key
+            else:
+                spoken, state.last_key, state.last_spoken_at = guidance.navigate_say(
+                    cue, vis_key, prev_vis_key, now=now,
+                    last_spoken_at=state.last_spoken_at, repeat_s=LIVE_REPEAT_S)
+            result["say"] = spoken
         destination = memory.navigable_destination(name)
         result = {**result, "mode": "visual", "current_place": None,
-                  "destination": destination, "next_instruction": None}
+                  "destination": destination, "next_instruction": result.get("say") or None}
     broadcaster.publish(_event("guide", item=name, frame=_frame_data_url(data), **result))
     if result["say"]:
         broadcaster.publish(_event("say", text=result["say"], source="guide"))

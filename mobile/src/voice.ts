@@ -24,20 +24,28 @@ export function configureVoice(backend: Api, health: { tts?: string; tts_guidanc
 
 async function fetchAudio(text: string, { cachedOnly, timeoutMs }: { cachedOnly: boolean; timeoutMs: number }) {
   if (!api) throw new Error('voice not configured');
-  isVoiceActive = true;
+  // Do not mark the voice "active" during the HTTP fetch: that kept Hey Jarvis disabled for
+  // the whole network round-trip even when nothing was playing yet.
+  return api.speak(text, cachedOnly, timeoutMs);
+}
+
+function disposePlayer() {
   try {
-    return await api.speak(text, cachedOnly, timeoutMs);
-  } finally {
-    if (!player?.playing) isVoiceActive = false;
-  }
+    player?.pause();
+  } catch { /* ignore */ }
+  try {
+    player?.remove();
+  } catch { /* ignore */ }
+  player = null;
 }
 
 /** Silence the ElevenLabs player AND the built-in voice, right now. */
 function stopAll() {
-  player?.pause();
   finishPlayback?.();
+  disposePlayer();
   void Speech.stop();
   finishSpeech?.();
+  isVoiceActive = false;
 }
 
 /** The built-in voice. Resolves when it has finished (or was stopped). */
@@ -68,47 +76,61 @@ async function play(bytes: Uint8Array): Promise<void> {
   const file = new File(Paths.cache, `sightline-tts-${fileCounter++ % 4}.mp3`);
   if (!file.exists) file.create();
   file.write(bytes);
-  if (!player) player = createAudioPlayer({ uri: file.uri }, { keepAudioSessionActive: true });
-  else player.replace({ uri: file.uri });
+  disposePlayer();
+  // keepAudioSessionActive:false so Hey Jarvis can reclaim the mic after each cue.
+  player = createAudioPlayer({ uri: file.uri }, { keepAudioSessionActive: false });
   const current = player;
   isVoiceActive = true;
   try {
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       let settled = false;
-      let startedAt = Date.now();
+      const startedAt = Date.now();
       let sawPlaying = false;
       const subscription = current.addListener('playbackStatusUpdate', (status) => {
         if (status.playing) sawPlaying = true;
         if (status.didJustFinish) done();
       });
-      // Safety poll: if play() silently failed on iOS (e.g. audio session race) or finished without firing
-      // didJustFinish, don't block speechBusy for 30s.
+      // Safety poll: if play() silently failed to start on iOS (e.g. audio session race), reject so
+      // voiceCore falls back to the built-in Speech synthesizer instead of dropping the instruction.
       const poll = setInterval(() => {
         if (current.playing) {
           sawPlaying = true;
-        } else if (sawPlaying || Date.now() - startedAt > 4000) {
+        } else if (sawPlaying) {
           done();
+        } else if (Date.now() - startedAt > 1500) {
+          fail(new Error('AudioPlayer did not start playing'));
         }
-      }, 200);
-      const timer = setTimeout(done, MAX_PLAY_MS);
-      function done() {
-        if (settled) return;
-        settled = true;
+      }, 150);
+      const timer = setTimeout(() => done(), MAX_PLAY_MS);
+      function cleanup() {
         clearTimeout(timer);
         clearInterval(poll);
         subscription.remove();
         if (finishPlayback === done) finishPlayback = null;
+      }
+      function done() {
+        if (settled) return;
+        settled = true;
+        cleanup();
         resolve();
+      }
+      function fail(err: Error) {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
       }
       finishPlayback = done;
       try {
         current.play();
-      } catch {
-        done();
+      } catch (e) {
+        fail(e instanceof Error ? e : new Error(String(e)));
       }
     });
   } finally {
     isVoiceActive = false;
+    // Release the player so AVAudioSession is free for the wake-word microphone stream.
+    if (player === current) disposePlayer();
   }
 }
 
@@ -118,13 +140,12 @@ export const voice = createVoice<Uint8Array>({
   fetchAudio, play, stopAll, builtin, getConfig: () => config,
 });
 
-/** True while an ElevenLabs reply/cue is being fetched or played (the built-in voice is checked with Speech.isSpeakingAsync). */
+/** True while an ElevenLabs reply/cue is being played (the built-in voice is checked with Speech.isSpeakingAsync). */
 export function isVoicePlaying(): boolean {
-  return isVoiceActive || (player?.playing ?? false);
+  return isVoiceActive;
 }
 
 export function releaseVoice() {
   voice.stop();
-  player?.remove();
-  player = null;
+  disposePlayer();
 }
