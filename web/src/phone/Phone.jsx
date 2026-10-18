@@ -3,6 +3,7 @@ import * as api from "./api.js";
 import { createBeeper, panFromAngle, pitchBoost, unlockAudio } from "./audio.js";
 import { listen, parseCommand, recognitionSupported, speak, unlockSpeech } from "./speech.js";
 import { startRecording } from "./recorder.js";
+import { setVoiceConfig, unlockVoice, voice } from "./voiceBrowser.js";
 import { guideIntervalMs, waitMs } from "./pacing.js";
 import {
   compensate, getYaw, requestOrientationPermission, startOrientation, stopOrientation,
@@ -75,6 +76,7 @@ export default function Phone() {
       setMock(h.mock);
       setSttMode(h.stt ?? "browser");
       guideMsRef.current = guideIntervalMs(h.guide_max_fps);
+      setVoiceConfig(h); // ElevenLabs voice on/off and the guidance-cue setting
     }).catch(() => {});
   }, []);
 
@@ -123,7 +125,7 @@ export default function Phone() {
           // null = 204: the backend dropped this frame (still busy). Keep the last result.
           if (r) {
             guideRef.current = { last: r, yawAtLast: yaw, at: performance.now() };
-            if (r.say) { speak(r.say, { interrupt: true }); setCue(r.say); }
+            if (r.say) { voice.cue(r.say); setCue(r.say); }
           }
         } catch {
           setStatus("Connection problem. Still trying.");
@@ -143,7 +145,7 @@ export default function Phone() {
     setGuiding(null);
     setCue("");
     setStatus("Guidance stopped.");
-    speak("Stopped", { interrupt: true, force: true });
+    voice.cue("Stopped.");
   }, []);
 
   // Fixed-phrase handling. Used when /api/chat is unreachable so the demo never breaks.
@@ -185,12 +187,13 @@ export default function Phone() {
     if (r.intent === "find" && r.item) setGuiding(r.item);
     if (r.intent === "set_room" && r.room) setRoom(r.room);
     setStatus(r.say);
-    speak(r.say, { force: true });
+    voice.reply(r.say); // ElevenLabs voice when enabled, built-in voice on any failure
   }, [runLegacyCommand, stopGuidance]);
 
   async function unlock() {
     unlockAudio();
     unlockSpeech();
+    unlockVoice();
     if (await requestOrientationPermission()) startOrientation();
   }
   useEffect(() => () => stopOrientation(), []);
@@ -226,6 +229,7 @@ export default function Phone() {
 
   function startTalk() {
     if (listening) return;
+    voice.stop(); // do not talk over the user
     unlock();
     setListening(true);
     setStatus("Listening…");
