@@ -36,7 +36,7 @@ CACHE_ENTRIES = 100
 MAX_CACHED_BYTES = 300_000
 
 # Fixed guidance cues (see backend/app/guidance.py). Pre-rendered at startup so they play instantly.
-PREWARM_PHRASES = ["Reach out now", "Stopped.", "Lost it. Turn slowly left."]
+PREWARM_PHRASES = ["Reach out now", "Stopped.", "Lost it. Turn slowly left.", "Lost it. Turn slowly right."]
 
 
 class TTSError(Exception):

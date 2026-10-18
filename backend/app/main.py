@@ -147,7 +147,7 @@ def _guide_payload(*, found: bool, say: str = "", beep_ms: int = 0, mode: str = 
             "next_instruction": next_instruction}
 
 
-def _navigate_guide(name: str, frame: bytes, hints: dict, now: float) -> dict:
+def _navigate_guide(name: str, frame: bytes, hints: dict, now: float, yaw: float | None = None) -> dict:
     """Room-to-room cue when the target item is not visible in this frame."""
     history = db.recent_sightings(name, 1)
     destination = memory.destination_for(history[0]) if history else None
@@ -156,7 +156,7 @@ def _navigate_guide(name: str, frame: bytes, hints: dict, now: float) -> dict:
         state = _guide_states.get(name)
         if state is None or now - state.touched > GUIDE_STATE_TTL_S:
             state = _guide_states[name] = guidance.GuideState(since=now)
-        result = guidance.compute_guide(name, None, state, db.guidance_style(), fov_h(), now)
+        result = guidance.compute_guide(name, None, state, db.guidance_style(), fov_h(), now, yaw)
         return _guide_payload(found=False, say=result["say"], mode="lost")
 
     places = memory.get_map()["places"]
@@ -330,15 +330,15 @@ async def guide(request: Request, frame: UploadFile = File(...), item: str = For
     box = next((d.box for d in detections if (db.canonicalize_item(d.item) or d.item) == name), None)
     now = time.monotonic()
     if box is None:
-        result = await run_in_threadpool(_navigate_guide, name, data, hints, now)
+        result = await run_in_threadpool(_navigate_guide, name, data, hints, now, yaw_deg)
     else:
         _navigate_states.pop(name, None)
         state = _guide_states.get(name)
         if state is None or now - state.touched > GUIDE_STATE_TTL_S:
             state = _guide_states[name] = guidance.GuideState(since=now)
-        # TODO(B): yaw_deg is accepted but unused server-side; yaw compensation runs in the browser
-        #          (web/src/phone/orientation.js). Use it here if you want server-side smoothing.
-        result = guidance.compute_guide(name, box, state, db.guidance_style(), fov_h(), now)
+        # yaw_deg (the phone's heading) is remembered so a later "Lost it" cue can point the shorter way;
+        # beep panning between updates is still compensated in the apps.
+        result = guidance.compute_guide(name, box, state, db.guidance_style(), fov_h(), now, yaw_deg)
         history = db.recent_sightings(name, 1)
         destination = memory.destination_for(history[0]) if history else None
         result = {**result, "mode": "visual", "current_place": None,

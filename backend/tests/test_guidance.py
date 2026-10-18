@@ -123,5 +123,74 @@ def test_compute_guide_smooths_then_loses():
     assert r["angle"] == pytest.approx(0.5 * 22.75 + 0.5 * -3.25, abs=0.1)
     assert g.compute_guide("wallet", None, state, "clock_face", 65, now=3.0)["say"] == ""
     lost = g.compute_guide("wallet", None, state, "clock_face", 65, now=4.1)
-    assert lost["found"] is False and lost["say"] == "Lost it. Turn slowly left."
+    # it was last seen to the right (smoothed angle +9.75), so turning right is the shorter way back
+    assert lost["found"] is False and lost["say"] == "Lost it. Turn slowly right."
     assert lost["beep_ms"] == 0
+
+
+# ---- which way to turn when the item is lost ----
+
+def test_turn_direction_follows_where_the_item_was_last_seen():
+    assert g.turn_direction(None, None, None) == "left"          # never seen: the original cue
+    assert g.turn_direction(15.0, None, None) == "right"
+    assert g.turn_direction(-15.0, None, None) == "left"
+    assert g.turn_direction(0.0, None, None) == "left"           # dead ahead and lost: nothing better to say
+
+
+def test_turn_direction_accounts_for_how_far_the_phone_has_turned():
+    # seen 20 degrees to the right when the heading was 100
+    assert g.turn_direction(20, 100, 100) == "right"             # not moved
+    assert g.turn_direction(20, 100, 130) == "left"              # turned right 30, past it: come back left
+    assert g.turn_direction(20, 100, 70) == "right"              # turned left 30: it is now 50 to the right
+    assert g.turn_direction(-20, 100, 60) == "right"             # turned left 40, past it: it is now 20 to the right
+    assert g.turn_direction(-20, 100, 130) == "left"             # turned right 30: it is now 50 to the left
+
+
+def test_turn_direction_takes_the_short_way_across_north_and_behind_you():
+    assert g.turn_direction(20, 350, 10) == "left"               # heading 350 -> 10 is a 20 degree right turn: it is now 0 or just left
+    assert g.turn_direction(20, 350, 30) == "left"               # turned right 40 across north, past it
+    assert g.turn_direction(-20, 10, 340) == "right"             # turned left 30 across north, past it
+    assert g.turn_direction(20, 100, 280) == "left"              # turned 180: the item is behind, 160 to the left
+    assert g.turn_direction(-20, 100, 280) == "right"            # ... and 160 to the right for an item that was on the left
+    assert g.turn_direction(10, 100, 100 + 179) == "left"        # turned right 179: item is 169 to the left
+    assert g.turn_direction(10, 100, 100 - 179) == "left"        # turned left 179: item is 189 to the right = 171 to the left
+
+
+def test_turn_direction_ignores_a_missing_heading():
+    assert g.turn_direction(20, None, 130) == "right"            # no heading when it was seen
+    assert g.turn_direction(20, 100, None) == "right"            # no heading now
+    assert g.turn_direction(-20, None, None) == "left"
+
+
+def test_say_lost_uses_the_turn_it_is_given():
+    left = g.say("wallet", None, None, None, "clock_face", found=False, lost_s=2.0)
+    right = g.say("wallet", None, None, None, "left_right", found=False, lost_s=2.0, turn="right")
+    assert left == ("Lost it. Turn slowly left.", "lost")
+    assert right == ("Lost it. Turn slowly right.", "lost")
+    assert len(right[0].split()) < 8
+    assert g.say("wallet", None, None, None, "beeps_only", found=False, lost_s=5, turn="right")[0] == ""
+
+
+def test_compute_guide_lost_points_the_shorter_way():
+    def lose(box, yaw_seen, yaw_now):
+        state = g.GuideState(since=0.0)
+        g.compute_guide("wallet", box, state, "clock_face", 65, now=1.0, yaw=yaw_seen)
+        return g.compute_guide("wallet", None, state, "clock_face", 65, now=3.5, yaw=yaw_now)["say"]
+
+    right_box = [0.8, 0.5, 0.9, 0.65]                            # x=.85 -> +22.75 degrees (right)
+    left_box = [0.1, 0.5, 0.2, 0.65]                             # x=.15 -> -22.75 degrees (left)
+    assert lose(right_box, None, None) == "Lost it. Turn slowly right."
+    assert lose(left_box, None, None) == "Lost it. Turn slowly left."
+    assert lose(right_box, 100, 100) == "Lost it. Turn slowly right."
+    assert lose(right_box, 100, 140) == "Lost it. Turn slowly left."    # turned right 40, past it
+    assert lose(left_box, 100, 60) == "Lost it. Turn slowly right."     # turned left 40, past it
+    state = g.GuideState(since=0.0)
+    assert g.compute_guide("wallet", None, state, "clock_face", 65, now=3.0)["say"] == "Lost it. Turn slowly left."
+
+
+def test_compute_guide_remembers_the_heading_of_the_last_sighting():
+    state = g.GuideState(since=0.0)
+    g.compute_guide("wallet", [0.4, 0.5, 0.5, 0.65], state, "clock_face", 65, now=1.0, yaw=123.0)
+    assert state.yaw_at_last == 123.0
+    g.compute_guide("wallet", [0.4, 0.5, 0.5, 0.65], state, "clock_face", 65, now=1.2)
+    assert state.yaw_at_last is None                             # an update without a heading clears the old one
