@@ -86,3 +86,7 @@ in mock mode (the default) the beeps follow fake positions.
 
 Further reading before the demo: `src/Controls.tsx` is the whole screen logic, mirroring
 `web/src/phone/Phone.jsx`.
+
+## Voice (text-to-speech)
+
+Chat replies are spoken with the backend's ElevenLabs voice when `TTS_PROVIDER=elevenlabs` (root `.env`; see the root README). Fast guidance cues use the built-in voice, except fixed cues the server already has cached. If `/api/speak` fails or is slow, the app speaks with the built-in voice. Unverified: playback on real phones (`src/voice.ts` cannot detect a silent playback failure; TODO(C)).

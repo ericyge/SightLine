@@ -132,6 +132,28 @@ The phone then records a short clip while you hold the button and the backend se
 ### Native phone app (`mobile/`)
 The Expo app in `mobile/` uses the same backend: camera frames, hold-to-talk, Gemini chat and directional beeps. It needs the backend reachable from the phone (`--host 0.0.0.0` on the same Wi-Fi, or `ngrok http 8000`); see `mobile/README.md`. Untested on real devices.
 
+### Text-to-speech (optional ElevenLabs voice)
+By default the phone speaks with its built-in voice (no keys). To hear replies in your chosen ElevenLabs voice, set in `.env` and restart the backend:
+```
+TTS_PROVIDER=elevenlabs
+ELEVENLABS_API_KEY=...
+ELEVENLABS_VOICE_ID=...        # from your ElevenLabs account
+# ELEVENLABS_TTS_MODEL=        # blank = eleven_flash_v2_5; see .env.example if it is rejected
+# TTS_GUIDANCE=cached          # or never
+```
+Chat replies (the `say` from `/api/chat`) use that voice. Fast guidance cues ("Wallet at 2 o'clock") stay on the built-in voice so guidance never waits on the network. The fixed cues ("Reach out now", "Stopped.", "Lost it. Turn slowly left.") are rendered once at startup and cached in memory, so they use your voice instantly when `TTS_GUIDANCE=cached`. If ElevenLabs fails or is slow, the phone speaks the same words with its built-in voice, so it is never silent. Only the phone speaks; the dashboard is silent.
+
+### Privacy: what leaves your machine
+Frames are processed and discarded; only item, place, time and a small thumbnail are stored, never video. Per service:
+| Service | When | What is sent |
+|---|---|---|
+| Perceptron | `PERCEPTRON_MODE=live` | the current camera frame (JPEG) and the item descriptions |
+| Gemini / Purple | `LLM_PROVIDER` is not `mock` | your words, the last 6 turns, item/alias/room names. Never frames, thumbnails or sighting history |
+| ElevenLabs speech-to-text | `STT_PROVIDER=elevenlabs` | your recorded voice clip |
+| ElevenLabs text-to-speech | `TTS_PROVIDER=elevenlabs` | **only the reply text** to be spoken. Never your audio or camera frames |
+
+Keys, the text being spoken and audio are never logged. Short spoken phrases are cached in server memory (as hashes), not on disk.
+
 ## Layout
 
 | Path                       | What                                                                                                                              |

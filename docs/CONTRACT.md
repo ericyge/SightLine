@@ -94,3 +94,19 @@ Everything above is verbatim from the project brief. The items below are what th
 - **`confidence`** is a constant `0.8` in live mode: the SDK's box has no confidence field. **`spot`** is `""` in live mode (TODO: needs a second call), so `/api/where` answers "In your bedroom, about 4 minutes ago."
 - `GET /api/health` also returns `vision` (`{calls, p50_ms, p95_ms, errors, dropped}` for the last 200 successful calls, `null` in mock) and `guide_max_fps` (env `GUIDE_MAX_FPS`, default 3, kept within 0.5-10). Clients send at most that many `/api/guide` frames per second, one request at a time. Memory (`/api/observe`) stays at about 1 frame per second.
 - Frames are processed and discarded. Only the item, place, time and a small thumbnail are stored. `video_frames` and streaming endpoints are not used.
+
+---
+
+# Text-to-speech (added)
+
+  POST /api/speak   JSON: { text }  (1 to 300 characters)   query: cached_only (bool, default false)
+      -> 200 audio/mpeg (mp3), header X-TTS-Cache: hit | miss
+      -> 204 (cached_only=true and the phrase is not cached; ElevenLabs is not called)
+      -> 503 TTS is not enabled   502 ElevenLabs failed or timed out   422 bad text
+  GET  /api/health  also returns  tts ("elevenlabs"|"browser")  and  tts_guidance ("cached"|"never")
+
+- `TTS_PROVIDER=browser` (default): `/api/speak` answers 503 and phones use their built-in voice. `elevenlabs` needs `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`; otherwise `health.tts` stays `"browser"`.
+- Relay (per ElevenLabs' docs): `POST {ELEVENLABS_BASE_URL or https://api.elevenlabs.io/v1}/text-to-speech/{voice_id}?output_format=mp3_44100_128`, header `xi-api-key`, JSON body `{text, model_id}`. `model_id` = `ELEVENLABS_TTS_MODEL`, blank = `eleven_flash_v2_5` (unconfirmed on ElevenLabs' docs page; see `.env.example`). Timeout `TTS_TIMEOUT_S` (default 3). No automatic retries.
+- **Cache:** text of 80 characters or less is cached in memory (LRU, 100 entries, keyed by a hash of voice + model + format + normalized text), so repeats are instant and free. The fixed guidance cues are pre-rendered in the background at startup.
+- **Apps:** use `/api/speak` for chat replies (`say` from `/api/chat`). Fast guidance cues use the built-in voice unless `tts_guidance` is `"cached"` AND `cached_only=true` returns audio (a 204 means use the built-in voice). Any error, 5xx or slowness (2.5 s for replies, 0.6 s for cached cues) falls back to the built-in voice, so the user never hears nothing.
+- **Privacy:** only the reply text goes to ElevenLabs. Never the user's audio, camera frames, thumbnails or history. The key and the spoken text are never logged.
