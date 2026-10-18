@@ -149,6 +149,14 @@ ELEVENLABS_VOICE_ID=...        # from your ElevenLabs account
 ```
 Chat replies (the `say` from `/api/chat`) use that voice. Fast guidance cues ("Wallet at 2 o'clock") stay on the built-in voice so guidance never waits on the network. The fixed cues ("Reach out now", "Stopped.", "Lost it. Turn slowly left.") are rendered once at startup and cached in memory, so they use your voice instantly when `TTS_GUIDANCE=cached`. If ElevenLabs fails or is slow, the phone speaks the same words with its built-in voice, so it is never silent. Only the phone speaks; the dashboard is silent.
 
+### "Hey Jarvis" wake word (optional, Expo app)
+Say "Hey Jarvis" while the app is open and it starts listening, like pressing the talk button. It is off unless you turn it on, because the app then streams the microphone to **your own backend** (audio is scored in memory and never stored or logged; it does not go to any other service). Set up once, from the repo root:
+```powershell
+backend\.venv\Scripts\python -m pip install -r backend\requirements-wake.txt
+backend\.venv\Scripts\python -m audio_directions.setup_wake      # downloads the small local models (git-ignored)
+```
+then add `WAKE_ENABLED=true` to `.env` (it also needs `STT_PROVIDER=elevenlabs`) and restart the backend. The app shows a "Hey Jarvis: ON" switch and a "Wake word:" line in the debug box. Limits you should know: it only works while the app is open; on iPhone nothing can play sound while the microphone stream is on, so it pauses during guidance and while replies are spoken, and resumes afterwards; "Hey Jarvis" is a stand-in phrase. Tested with a synthesized voice only; not yet tried with a real person or a phone. Details: `docs/CONTRACT.md` and `mobile/README.md`.
+
 ### Privacy: what leaves your machine
 Frames are processed and discarded; only item, place, time and a small thumbnail are stored, never video. Per service:
 | Service | When | What is sent |
@@ -157,6 +165,7 @@ Frames are processed and discarded; only item, place, time and a small thumbnail
 | Gemini / Purple | `LLM_PROVIDER` is not `mock` | your words, the last 6 turns, item/alias/room names. Never frames, thumbnails or sighting history |
 | ElevenLabs speech-to-text | `STT_PROVIDER=elevenlabs` | your recorded voice clip |
 | ElevenLabs text-to-speech | `TTS_PROVIDER=elevenlabs` | **only the reply text** to be spoken. Never your audio or camera frames |
+| Wake word | `WAKE_ENABLED=true` | your microphone audio, **to your own backend only** (scored in memory, never stored, logged or forwarded) |
 
 Keys, the text being spoken and audio are never logged. Short spoken phrases are cached in server memory (as hashes), not on disk.
 

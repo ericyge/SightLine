@@ -13,6 +13,7 @@ export type Health = {
   guide_max_fps: number;
   tts: 'elevenlabs' | 'browser';          // elevenlabs: speak chat replies via /api/speak
   tts_guidance: 'cached' | 'never';       // whether fixed guidance cues may use cached ElevenLabs audio
+  wake?: boolean;                          // true when WS /ws/wake can run (WAKE_ENABLED, packages, models)
 };
 export type Profile = { watchlist: { name: string }[]; rooms: string[]; guidance_style: string };
 export type GuideResponse = {

@@ -7,7 +7,7 @@ import {
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as Speech from 'expo-speech';
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, Vibration, View } from 'react-native';
 import { Api, type ChatResponse, type ChatTurn, type GuideResponse, type UploadFile } from './api';
 import { playBeep, prepareBeeps, releaseBeeps } from './beeps';
 import { CameraWatchdog, SingleFlight } from './capture';
@@ -17,7 +17,9 @@ import {
 import { compensate, panFromAngle, pitchBoost } from './guidance';
 import { getYaw, startOrientation, stopOrientation } from './orientation';
 import { loadServer, saveServer } from './serverStore';
-import { configureVoice, releaseVoice, voice } from './voice';
+import { configureVoice, isVoicePlaying, releaseVoice, voice } from './voice';
+import { useWake } from './useWake';
+import { File, Paths } from 'expo-file-system';
 import { guideIntervalMs, waitMs } from './pacing';
 
 const LOOP_MS = 1000;
@@ -59,6 +61,9 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   const [connected, setConnected] = useState(false);
   const [mock, setMock] = useState(false);
   const [stt, setStt] = useState<'elevenlabs' | 'browser'>('browser');
+  const [wakeAvailable, setWakeAvailable] = useState(false);   // backend can run the wake word
+  const [wakeOn, setWakeOn] = useState(true);                   // the user's switch
+  const [wakeBusy, setWakeBusy] = useState(false);              // handling a wake request, or its reply is playing
   const [rooms, setRooms] = useState<string[]>(['bedroom', 'kitchen', 'living room']);
   const [room, setRoom] = useState('bedroom');
   const [status, setStatus] = useState('Set the server address to begin.');
@@ -117,6 +122,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
         saveServer(server);   // remember it for the next reload
         setMock(health.mock);
         setStt(health.stt);
+        setWakeAvailable(Boolean(health.wake));
         configureVoice(api, health);   // ElevenLabs voice on/off and the guidance-cue setting
         guideMs.current = guideIntervalMs(health.guide_max_fps);
         setRooms(profile.rooms);
@@ -271,26 +277,88 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     void voice.cue('Stopped.');
   }, []);
 
-  const apply = useCallback((r: ChatResponse) => {
+  const apply = useCallback(async (r: ChatResponse) => {
     history.current = [...history.current, { role: 'assistant' as const, content: r.say.slice(0, 500) }]
       .slice(-HISTORY_TURNS);
     if (r.intent === 'stop') return stopGuidance();
     if (r.intent === 'find' && r.item) setGuiding(r.item);
     if (r.intent === 'set_room' && r.room) setRoom(r.room);
     setStatus(r.say);
-    void voice.reply(r.say);   // ElevenLabs voice when enabled, built-in voice on any failure
+    await voice.reply(r.say);   // ElevenLabs voice when enabled, built-in voice on any failure
   }, [stopGuidance]);
 
   const runCommand = useCallback(async (text: string) => {
     history.current = [...history.current, { role: 'user' as const, content: text.slice(0, 500) }]
       .slice(-HISTORY_TURNS);
     try {
-      apply(await api.chat(text, history.current.slice(0, -1), roomRef.current));
+      await apply(await api.chat(text, history.current.slice(0, -1), roomRef.current));
     } catch {
       setStatus('Could not reach the server.');
       say('I could not reach the server.', true);
     }
   }, [api, apply]);
+
+  // ---- "Hey Jarvis": hands-free start of the same listening flow ----
+  // iOS: while the wake word streams the microphone nothing can play, so it is only on when the app is
+  // idle (not guiding, not replying, not holding the talk button) and is restarted after each request.
+  const wakeEnabled = wakeAvailable && wakeOn && connected && stt === 'elevenlabs' && !guiding && !listening && !wakeBusy;
+
+  /** Wait until the spoken reply has finished, so the microphone stream does not cut it off. */
+  const waitUntilQuiet = useCallback(async () => {
+    await sleep(500);   // let the reply start
+    let quietPolls = 0;
+    for (let waited = 0; waited < 20000 && quietPolls < 2; waited += 300) {
+      const speaking = (await Speech.isSpeakingAsync()) || isVoicePlaying();
+      quietPolls = speaking ? 0 : quietPolls + 1;
+      await sleep(300);
+    }
+    await sleep(500);
+  }, []);
+
+  const handleWakeRequest = useCallback(async (wav: Uint8Array, reason: string) => {
+    setWakeBusy(true);   // turns the stream off and restores the speaker before anything is played
+    try {
+      if (reason === 'no-speech') {
+        setStatus("I didn't hear a request. Say Hey Jarvis again.");
+        return;
+      }
+      setStatus('Thinking…');
+      const file = new File(Paths.cache, 'sightline-request.wav');
+      if (!file.exists) file.create();
+      file.write(wav);
+      const { text } = await api.transcribe({ uri: file.uri, name: 'request.wav', type: 'audio/wav' });
+      if (!text) {
+        setStatus("I didn't catch that. Say Hey Jarvis again.");
+        return;
+      }
+      await runCommand(text);
+      await waitUntilQuiet();
+    } catch {
+      setStatus('Speech service unavailable. Say Hey Jarvis again, or type your request.');
+    } finally {
+      setWakeBusy(false);
+    }
+  }, [api, runCommand, waitUntilQuiet]);
+
+  const wake = useWake({
+    enabled: wakeEnabled,
+    server,
+    onWake: () => { Vibration.vibrate(150); setStatus('Listening…'); },   // a buzz: nothing can play while listening
+    onUtterance: (wav, reason) => { void handleWakeRequest(wav, reason); },
+  });
+
+  const wakeLine = ((): { text: string; bad: boolean } => {
+    if (!wakeAvailable) return { text: 'not available on the server (WAKE_ENABLED=true and the wake packages/models)', bad: false };
+    if (stt !== 'elevenlabs') return { text: 'needs the server speech-to-text (STT_PROVIDER=elevenlabs)', bad: false };
+    if (!wakeOn) return { text: 'off', bad: false };
+    if (!connected) return { text: 'waiting for the backend', bad: false };
+    if (guiding) return { text: 'paused while guiding (the speaker is in use)', bad: false };
+    if (listening || wakeBusy) return { text: 'paused while handling a request', bad: false };
+    if (wake.state === 'error') return { text: wake.detail || 'error', bad: true };
+    if (wake.state === 'capturing') return { text: `heard you, capturing your request (${wake.level} dB)`, bad: false };
+    if (wake.state === 'listening') return { text: `listening for "Hey Jarvis" (mic ${wake.level} dB)`, bad: false };
+    return { text: 'connecting...', bad: false };
+  })();
 
   // ---- hold to talk (server speech-to-text) ----
   async function beginTalk() {
@@ -380,6 +448,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
               </Text>
             )}
             <Text style={[styles.debugText, loopLine.bad && styles.debugBad]}>Memory loop: {loopLine.text}</Text>
+            <Text style={[styles.debugText, wakeLine.bad && styles.debugBad]}>Wake word: {wakeLine.text}</Text>
             <Text style={styles.debugText}>
               Photo: {flight.inProgress ? `in progress for ${Math.round(flight.ageMs(now) / 1000)}s` : 'idle'}
             </Text>
@@ -398,6 +467,12 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
               </Text>
             )}
           </View>
+        )}
+        {wakeAvailable && (
+          <Pressable onPress={() => setWakeOn((w) => !w)} accessibilityRole="switch" accessibilityState={{ checked: wakeOn }}
+            accessibilityLabel="Hey Jarvis wake word" style={styles.link}>
+            <Text style={styles.linkText}>Hey Jarvis: {wakeOn ? 'ON (tap to turn off)' : 'OFF (tap to turn on)'}</Text>
+          </Pressable>
         )}
         <Pressable onPress={testPhoto} accessibilityRole="button" accessibilityLabel="Test one photo" style={styles.link}>
           <Text style={styles.linkText}>Test one photo (camera check)</Text>

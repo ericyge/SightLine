@@ -48,6 +48,11 @@ export const voice = createVoice<Uint8Array>({
   fetchAudio, play, stopPlayback, builtin: builtinSpeak, getConfig: () => config,
 });
 
+/** True while an ElevenLabs reply is playing (the built-in voice is checked with Speech.isSpeakingAsync). */
+export function isVoicePlaying(): boolean {
+  return player?.playing ?? false;
+}
+
 export function releaseVoice() {
   player?.remove();
   player = null;

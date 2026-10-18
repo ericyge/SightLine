@@ -199,3 +199,17 @@ The notes below specify additional behavior; update both when behavior changes.
 - **Cache:** text of 80 characters or less is cached in memory (LRU, 100 entries, keyed by a hash of voice + model + format + normalized text), so repeats are instant and free. The fixed guidance cues are pre-rendered in the background at startup.
 - **Apps:** use `/api/speak` for chat replies (`say` from `/api/chat`). Fast guidance cues use the built-in voice unless `tts_guidance` is `"cached"` AND `cached_only=true` returns audio (a 204 means use the built-in voice). Any error, 5xx or slowness (2.5 s for replies, 0.6 s for cached cues) falls back to the built-in voice, so the user never hears nothing.
 - **Privacy:** only the reply text goes to ElevenLabs. Never the user's audio, camera frames, thumbnails or history. The key and the spoken text are never logged.
+
+---
+
+# Wake word (added)
+
+  WS  /ws/wake      client -> server: binary frames of 16 kHz mono 16-bit little-endian audio (under 64 KB each)
+                    client -> server: text "reset" (clear the detector; send before resuming after a request)
+                    server -> client: {"type":"ready"} | {"type":"wake","score":0.97} | {"type":"error","reason":"..."}
+  GET /api/health   also returns  wake (true when /ws/wake can run)
+
+- Opt-in: `WAKE_ENABLED=true`, the optional packages in `backend/requirements-wake.txt`, and the models from `python -m audio_directions.setup_wake` (never downloaded at runtime). Otherwise the socket answers `error` with the reason and closes, and `health.wake` is false.
+- The phrase is "Hey Jarvis" (openWakeWord's pretrained stand-in; "Hey Sightline" would need a custom model). `WAKE_THRESHOLD` (default 0.6) sets the score needed. After a wake the server ignores further wakes for 3 s and resets its detector. At most 2 connections at once.
+- **Privacy:** audio is scored in memory frame by frame and discarded. It is never stored, forwarded to any other service, or logged; only the wake event comes back. (It does travel from the phone to your backend, through the tunnel if you use one.)
+- The phone starts the same listening flow as the talk button: it captures the request that follows on the same stream, stops when you stop talking, and sends it as a WAV to `/api/transcribe`, then `/api/chat`.
