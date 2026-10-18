@@ -74,6 +74,9 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   const [restarts, setRestarts] = useState(0);                            // automatic camera restarts
   const [flight] = useState(() => new SingleFlight());                    // one photo at a time
   const [watchdog] = useState(() => new CameraWatchdog(RESTART_AFTER_FAILS, STUCK_RESTART_MS, RESTART_COOLDOWN_MS));
+  const memBeat = useRef(0);                                          // last time the memory loop ticked
+  const [beat, setBeat] = useState(0);
+  const [testing, setTesting] = useState(false);
   const [now, setNow] = useState(0);                                      // ticks so the 'Ns ago' text stays fresh
 
   const roomRef = useRef(room);
@@ -83,7 +86,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   useEffect(() => { cameraReadyRef.current = cameraReady; }, [cameraReady]);
   useEffect(() => {
     cameraStartedAt.current = Date.now();
-    const t = setInterval(() => setNow(Date.now()), 1000);
+    const t = setInterval(() => { setNow(Date.now()); setBeat(memBeat.current); }, 1000);
     return () => clearInterval(t);
   }, []);
   const history = useRef<ChatTurn[]>([]);
@@ -171,6 +174,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     let cancelled = false;
     (async () => {
       while (!cancelled) {
+        memBeat.current = Date.now();
         if (pausedRef.current || !cameraUsable()) { await sleep(250); continue; }
         const t0 = Date.now();
         let result: Result;
@@ -246,6 +250,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     const camera = cameraRef.current;
     if (!camera) { setTestResult('Test photo: camera ref is empty'); return; }
     pausedRef.current = true;
+    setTesting(true);
     const t0 = Date.now();
     setTestResult('Test photo: taking...');
     try {
@@ -255,6 +260,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
       setTestResult(`Test photo: FAILED after ${Date.now() - t0} ms: ${errorText(e)}`);
     } finally {
       pausedRef.current = false;
+      setTesting(false);
     }
   }
 
@@ -337,6 +343,16 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     void runCommand(text);
   };
 
+  // Why the memory loop is (not) taking photos, in one line.
+  const loopLine = ((): { text: string; bad: boolean } => {
+    if (guiding) return { text: 'off while guiding', bad: false };
+    if (!connected) return { text: 'NOT STARTED: backend not connected', bad: true };
+    if (testing) return { text: 'paused for the test photo', bad: false };
+    if (beat === 0) return { text: 'starting...', bad: false };
+    const idle = Math.round((now - beat) / 1000);
+    return idle > 3 ? { text: `STOPPED (last tick ${idle}s ago)`, bad: true } : { text: 'running', bad: false };
+  })();
+
   return (
     <View style={styles.overlay} pointerEvents="box-none">
       <View style={styles.panel}>
@@ -363,6 +379,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
                 Photos only start after the backend connects. Open settings, enter the server address and press Connect.
               </Text>
             )}
+            <Text style={[styles.debugText, loopLine.bad && styles.debugBad]}>Memory loop: {loopLine.text}</Text>
             <Text style={styles.debugText}>
               Photo: {flight.inProgress ? `in progress for ${Math.round(flight.ageMs(now) / 1000)}s` : 'idle'}
             </Text>
