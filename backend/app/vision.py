@@ -177,6 +177,22 @@ def match_class(mention: str | None, classes: list[str]) -> int | None:
     return 0 if len(classes) == 1 else None
 
 
+def use_system_certificates() -> None:
+    """Make the SDK's HTTP client trust the OS certificate store (antivirus/VPN/proxies re-sign HTTPS on
+    many laptops, which breaks Python's bundled certificates). The SDK looks `_http_client` up at call
+    time precisely so it can be replaced. Idempotent, and leaves a test's mock in place."""
+    import httpx
+    from perceptron import client as sdk
+    from .net import VERIFY
+    if getattr(sdk._http_client, "__qualname__", "") != "_http_client":
+        return   # already replaced (by us, or by a test)
+
+    def _system_cert_http_client(timeout):
+        return httpx.Client(timeout=timeout, verify=VERIFY)
+
+    sdk._http_client = _system_cert_http_client
+
+
 class PerceptronVision(VisionClient):
     """Live client (PERCEPTRON_MODE=live). One SDK `detect` call per frame.
 
@@ -199,6 +215,7 @@ class PerceptronVision(VisionClient):
         if not key:
             raise RuntimeError("PERCEPTRON_MODE=live needs PERCEPTRON_API_KEY in .env")
         import perceptron  # imported here so mock mode never needs the SDK
+        use_system_certificates()
         self.model = os.getenv("PERCEPTRON_MODEL") or DEFAULT_MODEL
         self.timeout_s = float(os.getenv("PERCEPTRON_TIMEOUT_S") or DEFAULT_TIMEOUT_S)
         perceptron.configure(api_key=key, provider="perceptron", timeout=self.timeout_s)

@@ -372,3 +372,35 @@ def test_probe_exit_codes(live, monkeypatch, capsys, tmp_path):
     monkeypatch.delenv("PERCEPTRON_API_KEY")
     code, out = run_probe(monkeypatch, capsys, str(img), "wallet")
     assert code == 1 and "PERCEPTRON_API_KEY" in out
+
+
+# ---- system certificates ------------------------------------------------------------------
+
+def test_sdk_http_client_uses_the_system_certificate_store(monkeypatch):
+    """Without this the SDK fails with CERTIFICATE_VERIFY_FAILED behind antivirus/VPN TLS re-signing."""
+    from perceptron import client as sdk
+
+    def _http_client(timeout):            # stands in for the SDK's original function (same qualname)
+        raise AssertionError("the original SDK client must not be used")
+
+    _http_client.__qualname__ = "_http_client"      # a nested function is named differently; match the SDK's
+    seen = {}
+
+    class Recorder:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(sdk, "_http_client", _http_client)
+    monkeypatch.setattr("httpx.Client", Recorder)
+    monkeypatch.setenv("PERCEPTRON_API_KEY", KEY)
+    PerceptronVision()
+    sdk._http_client(2.0)
+    from app.net import VERIFY
+    assert seen == {"timeout": 2.0, "verify": VERIFY}
+
+
+def test_a_test_mock_is_not_overwritten(live):
+    from perceptron import client as sdk
+    mock = sdk._http_client
+    PerceptronVision()
+    assert sdk._http_client is mock
