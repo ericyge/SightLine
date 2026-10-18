@@ -150,7 +150,9 @@ def _guide_payload(*, found: bool, say: str = "", beep_ms: int = 0, mode: str = 
 def _navigate_guide(name: str, frame: bytes, hints: dict, now: float, yaw: float | None = None) -> dict:
     """Room-to-room cue when the target item is not visible in this frame."""
     history = db.recent_sightings(name, 1)
-    destination = memory.destination_for(history[0]) if history else None
+    places = memory.get_map()["places"]
+    destination = (memory.destination_for(history[0]) or memory.infer_place_for_sighting(history[0], places)
+                   if history else None)
     nav = _nav_state(name, now)
     if destination is None:
         state = _guide_states.get(name)
@@ -159,10 +161,9 @@ def _navigate_guide(name: str, frame: bytes, hints: dict, now: float, yaw: float
         result = guidance.compute_guide(name, None, state, db.guidance_style(), fov_h(), now, yaw)
         return _guide_payload(found=False, say=result["say"], mode="lost")
 
-    places = memory.get_map()["places"]
     loc = get_vision().localize(frame, places, hints)
     current_id = loc.place_id
-    plan = memory.plan_route(current_id, destination["id"])
+    plan = memory.plan_route(current_id, destination["id"], allow_reverse=True)
 
     if plan.status == "already_there":
         text, nav.last_key = guidance.navigate_say(
@@ -277,7 +278,7 @@ async def observe(request: Request, frame: UploadFile = File(...), room: str | N
     return {"sightings": sightings}
 
 
-def _where_answer(item: str) -> WhereResponse:
+def _where_answer(item: str, from_place: str | None = None) -> WhereResponse:
     """Answer "where is X" from stored sightings (shared by /api/where and /api/chat)."""
     name = db.resolve_item(item)
     history = db.recent_sightings(name, 5) if name else []
@@ -288,21 +289,23 @@ def _where_answer(item: str) -> WhereResponse:
         return WhereResponse(item=label, found=False, say=text)
     last = history[0]
     destination = memory.destination_for(last)
+    route_info = memory.directions_to_item(name, from_place_id=from_place)
     minutes = max(0.0, (datetime.now(timezone.utc) - _parse_ts(last["ts"])).total_seconds() / 60)
     text = where_say(last["room"], last["spot"], minutes)
     if destination:
         room_phrase = f" in your {destination['room']}" if destination["room"] != UNKNOWN_ROOM else ""
         text = f"Last seen at {destination['name']}{room_phrase}, {ago_phrase(minutes)}."
     return WhereResponse(
-        item=name, history=history, destination=destination, say=text,
+        item=name, history=history, destination=destination,
+        directions=route_info.get("steps", []), say=text,
         last=WhereLast(room=last["room"], spot=last["spot"], minutes_ago=round(minutes, 1),
                        thumb=last["thumb"], confidence=last["confidence"]))
 
 
 @app.get("/api/where", response_model=WhereResponse)
-async def where(item: str):
+async def where(item: str, from_place: str | None = None):
     """Where was this item last seen? Always 200; found=false when never seen."""
-    answer = _where_answer(item)
+    answer = _where_answer(item, from_place=from_place)
     broadcaster.publish(_event("say", text=answer.say, source="where"))
     return answer
 
