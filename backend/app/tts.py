@@ -154,9 +154,12 @@ def get_tts() -> ElevenLabsTTS | None:
 
 
 def guidance_cues_mode() -> str:
-    """TTS_GUIDANCE: 'cached' (default) lets fixed guidance cues use ElevenLabs audio only when it is
-    already cached; 'never' keeps every guidance cue on the phone's built-in voice."""
-    return "never" if os.getenv("TTS_GUIDANCE", "cached").lower() == "never" else "cached"
+    """TTS_GUIDANCE: how guidance cues ("Wallet at 2 o'clock") are spoken.
+    'always' (default): in the ElevenLabs voice, like every other reply (the phone falls back to its own voice
+    only if ElevenLabs fails or is too slow), so you hear ONE voice. 'cached': ElevenLabs only for audio the
+    server already has (faster, but the phone's own voice is heard for the rest). 'never': always the phone's voice."""
+    value = os.getenv("TTS_GUIDANCE", "always").lower()
+    return value if value in ("always", "cached", "never") else "always"
 
 
 def prewarm(client: ElevenLabsTTS | None = None) -> int:

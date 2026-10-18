@@ -89,7 +89,7 @@ Further reading before the demo: `src/Controls.tsx` is the whole screen logic, m
 
 ## Voice (text-to-speech)
 
-Chat replies are spoken with the backend's ElevenLabs voice when `TTS_PROVIDER=elevenlabs` (root `.env`; see the root README). Fast guidance cues use the built-in voice, except fixed cues the server already has cached. If `/api/speak` fails or is slow, the app speaks with the built-in voice. Unverified: playback on real phones (`src/voice.ts` cannot detect a silent playback failure; TODO(C)).
+Everything the app says (replies, guidance cues, error messages) goes through one place, `src/voiceCore.ts`, and is spoken in the backend's ElevenLabs voice when `TTS_PROVIDER=elevenlabs` (root `.env`; see the root README). Only one voice speaks at a time: starting any speech silences both the ElevenLabs player and the iPhone voice first, a guidance cue waits for a reply to finish instead of cutting it off (only the newest waiting cue is spoken), and a new request from you interrupts. The iPhone voice is used only when ElevenLabs fails or takes too long (2.5 s for replies, 1.5 s for cues), or when `TTS_GUIDANCE` is `cached`/`never`. Unverified on real phones: that playback finishes are reported correctly (`src/voice.ts` ends a wait after 30 s regardless) and that a silent playback failure falls back (TODO(C)).
 
 ## Debug counters (what to look at when frames do not arrive)
 

@@ -40,12 +40,6 @@ const RESTART_COOLDOWN_MS = 15000;   // never restart more often than this
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-function say(text: string, interrupt = false) {
-  if (!text) return;
-  if (interrupt) void Speech.stop();
-  Speech.speak(text, { language: 'en-US' });
-}
-
 type Props = {
   cameraRef: RefObject<CameraView | null>;
   cameraReady: boolean;
@@ -294,7 +288,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
       await apply(await api.chat(text, history.current.slice(0, -1), roomRef.current));
     } catch {
       setStatus('Could not reach the server.');
-      say('I could not reach the server.', true);
+      void voice.reply('I could not reach the server.');
     }
   }, [api, apply]);
 
@@ -365,8 +359,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     if (listening || stt !== 'elevenlabs') return;
     setListening(true);
     setStatus('Listening…');
-    Speech.stop();
-    voice.stop();   // do not talk over the user
+    voice.stop();   // silence every voice: do not talk over the user
     const ready = (async () => {
       const perm = await requestRecordingPermissionsAsync();
       if (!perm.granted) { setStatus('Microphone permission is needed to talk.'); return false; }
@@ -390,17 +383,17 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
       setListening(false);
       if (Date.now() - current.startedAt < MIN_HOLD_MS || !recorder.uri) {
         setStatus('Hold the button while you speak.');
-        return say('Hold the button while you speak.');
+        return void voice.reply('Hold the button while you speak.');
       }
       setStatus('Thinking…');
       // m4a/AAC from expo-audio's preset. UNVERIFIED that ElevenLabs accepts it (docs say "all major formats").
       const { text } = await api.transcribe({ uri: recorder.uri, name: 'recording.m4a', type: 'audio/mp4' });
-      if (!text) { setStatus("I didn't hear anything. Try again."); return say("I didn't hear anything. Try again."); }
+      if (!text) { setStatus("I didn't hear anything. Try again."); return void voice.reply("I didn't hear anything. Try again."); }
       await runCommand(text);
     } catch {
       setListening(false);
       setStatus('Speech service unavailable. Type your request instead.');
-      say('Speech service unavailable. Type your request instead.');
+      void voice.reply('Speech service unavailable. Type your request instead.');
     }
   }
 
