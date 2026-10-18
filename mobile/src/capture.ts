@@ -21,10 +21,12 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, message: string)
 export class SingleFlight {
   private busy = false;
   private generation = 0;
+  private since = 0;
 
   async run<T>(task: () => Promise<T>, timeoutMs: number, timeoutMessage = 'photo timed out'): Promise<T> {
     if (this.busy) throw new Error('previous photo still in progress');
     this.busy = true;
+    this.since = Date.now();
     const mine = this.generation;
     const release = () => { if (this.generation === mine) this.busy = false; };
     let promise: Promise<T>;
@@ -46,6 +48,11 @@ export class SingleFlight {
 
   get inProgress() {
     return this.busy;
+  }
+
+  /** Milliseconds the current photo has been running, or 0 when idle. */
+  ageMs(now: number) {
+    return this.busy ? Math.max(0, now - this.since) : 0;
   }
 }
 

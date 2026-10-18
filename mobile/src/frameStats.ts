@@ -28,9 +28,10 @@ export type LoopStats = {
   dropped: number;
   failed: number;    // any failure, including camera/resize failures where nothing was sent
   last: Result | null;
+  firstFailure: Result | null;   // the very first failure: later ones are often just consequences
 };
 
-export const emptyStats = (): LoopStats => ({ sent: 0, ok: 0, dropped: 0, failed: 0, last: null });
+export const emptyStats = (): LoopStats => ({ sent: 0, ok: 0, dropped: 0, failed: 0, last: null, firstFailure: null });
 
 /** The stats after one more finished attempt. */
 export function record(s: LoopStats, r: Result): LoopStats {
@@ -41,6 +42,7 @@ export function record(s: LoopStats, r: Result): LoopStats {
     dropped: s.dropped + (r.kind === 'dropped' ? 1 : 0),
     failed: s.failed + (r.kind === 'failed' ? 1 : 0),
     last: r,
+    firstFailure: s.firstFailure ?? (r.kind === 'failed' ? r : null),
   };
 }
 
@@ -68,4 +70,11 @@ export function describeLast(s: LoopStats, now: number): string {
 /** One debug line: "Memory: 12 sent · 10 ok · 1 dropped · 3 failed". */
 export function summarize(label: string, s: LoopStats): string {
   return `${label}: ${s.sent} sent · ${s.ok} ok · ${s.dropped} dropped · ${s.failed} failed`;
+}
+
+/** The first failure in words, or '' when there has been none. */
+export function describeFirstFailure(s: LoopStats, now: number): string {
+  const f = s.firstFailure;
+  if (!f) return '';
+  return `FAILED at ${f.stage ?? 'upload'}: ${f.error ?? 'unknown error'}, ${ago(now, f.at)}`;
 }

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CameraWatchdog, SingleFlight, withTimeout } from './capture.ts';
-import { describeLast, emptyStats, errorText, record, StageError, summarize } from './frameStats.ts';
+import { describeFirstFailure, describeLast, emptyStats, errorText, record, StageError, summarize } from './frameStats.ts';
 import { angleDiff, cameraHeading, compensate, panFromAngle, pitchBoost } from './guidance.ts';
 import { guideIntervalMs, waitMs } from './pacing.ts';
 import { createVoice, CUE_TIMEOUT_MS, REPLY_TIMEOUT_MS } from './voiceCore.ts';
@@ -297,4 +297,24 @@ test('watchdog: repeated real camera errors restart, and a success resets everyt
   assert.equal(w.note(true, 'photo timed out', 60_000), false);
   assert.equal(w.note(true, 'photo timed out', 80_000), false);
   assert.equal(w.note(true, 'photo timed out', 100_000), true);
+});
+
+test('frame stats: the first failure is kept even after later, different failures', () => {
+  let s = emptyStats();
+  assert.equal(describeFirstFailure(s, 0), '');
+  s = record(s, { kind: 'ok', at: 1000, ms: 500 });
+  s = record(s, { kind: 'failed', at: 5000, ms: 15000, stage: 'camera', error: 'photo timed out' });
+  s = record(s, { kind: 'failed', at: 6000, ms: 1, stage: 'camera', error: 'previous photo still in progress' });
+  assert.equal(s.last.error, 'previous photo still in progress');
+  assert.equal(describeFirstFailure(s, 8000), 'FAILED at camera: photo timed out, 3s ago');
+});
+
+test('capture: ageMs reports how long the current photo has been running', async () => {
+  const flight = new SingleFlight();
+  assert.equal(flight.ageMs(Date.now()), 0);
+  const slow = flight.run(() => later(60, 'x'), 1000);
+  await later(20);
+  assert.ok(flight.ageMs(Date.now()) >= 15);
+  await slow;
+  assert.equal(flight.ageMs(Date.now()), 0);
 });

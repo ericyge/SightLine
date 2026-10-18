@@ -12,7 +12,7 @@ import { Api, type ChatResponse, type ChatTurn, type GuideResponse, type UploadF
 import { playBeep, prepareBeeps, releaseBeeps } from './beeps';
 import { CameraWatchdog, SingleFlight } from './capture';
 import {
-  describeLast, emptyStats, errorText, type LoopStats, record, type Result, StageError, summarize,
+  describeFirstFailure, describeLast, emptyStats, errorText, type LoopStats, record, type Result, StageError, summarize,
 } from './frameStats';
 import { compensate, panFromAngle, pitchBoost } from './guidance';
 import { getYaw, startOrientation, stopOrientation } from './orientation';
@@ -66,6 +66,8 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   const [memStats, setMemStats] = useState<LoopStats>(emptyStats);     // /api/observe frames
   const [guideStats, setGuideStats] = useState<LoopStats>(emptyStats);   // /api/guide frames
   const [showDebug, setShowDebug] = useState(true);
+  const [testResult, setTestResult] = useState('');                   // result of the one-tap camera test
+  const pausedRef = useRef(false);                                    // loops pause while the test runs
   const [restarts, setRestarts] = useState(0);                            // automatic camera restarts
   const [flight] = useState(() => new SingleFlight());                    // one photo at a time
   const [watchdog] = useState(() => new CameraWatchdog(RESTART_AFTER_FAILS, STUCK_RESTART_MS, RESTART_COOLDOWN_MS));
@@ -165,7 +167,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     let cancelled = false;
     (async () => {
       while (!cancelled) {
-        if (!cameraUsable()) { await sleep(250); continue; }
+        if (pausedRef.current || !cameraUsable()) { await sleep(250); continue; }
         const t0 = Date.now();
         let result: Result;
         try {
@@ -193,7 +195,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     let cancelled = false;
     (async () => {
       while (!cancelled) {
-        if (!cameraUsable()) { await sleep(250); continue; }
+        if (pausedRef.current || !cameraUsable()) { await sleep(250); continue; }
         const t0 = Date.now();
         let result: Result;
         try {
@@ -234,6 +236,23 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
     })();
     return () => { cancelled = true; guideRef.current = { last: null, yawAtLast: null, at: 0 }; };
   }, [api, guiding, captureFrame, afterAttempt]);
+
+  /** Take ONE photo with default options and report exactly what happened (isolates the camera). */
+  async function testPhoto() {
+    const camera = cameraRef.current;
+    if (!camera) { setTestResult('Test photo: camera ref is empty'); return; }
+    pausedRef.current = true;
+    const t0 = Date.now();
+    setTestResult('Test photo: taking...');
+    try {
+      const pic = await flight.run(() => camera.takePictureAsync(), CAPTURE_TIMEOUT_MS);
+      setTestResult(`Test photo: OK ${pic.width}x${pic.height} in ${Date.now() - t0} ms`);
+    } catch (e) {
+      setTestResult(`Test photo: FAILED after ${Date.now() - t0} ms: ${errorText(e)}`);
+    } finally {
+      pausedRef.current = false;
+    }
+  }
 
   const stopGuidance = useCallback(() => {
     setGuiding(null);
@@ -335,10 +354,17 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
             <Text style={styles.debugText}>
               Camera: {cameraReady ? 'ready' : 'starting...'}{restarts > 0 ? ` (restarted ${restarts}x)` : ''} | Backend: {connected ? 'connected' : 'NOT connected'}
             </Text>
+            <Text style={styles.debugText}>
+              Photo: {flight.inProgress ? `in progress for ${Math.round(flight.ageMs(now) / 1000)}s` : 'idle'}
+            </Text>
             <Text style={styles.debugText}>{summarize('Memory', memStats)}</Text>
             <Text style={[styles.debugText, memStats.last?.kind === 'failed' && styles.debugBad]}>
               Last memory frame: {describeLast(memStats, now)}
             </Text>
+            {memStats.firstFailure && memStats.firstFailure !== memStats.last && (
+              <Text style={[styles.debugText, styles.debugBad]}>First failure: {describeFirstFailure(memStats, now)}</Text>
+            )}
+            {testResult !== '' && <Text style={styles.debugText}>{testResult}</Text>}
             {guiding && <Text style={styles.debugText}>{summarize('Guide', guideStats)}</Text>}
             {guiding && (
               <Text style={[styles.debugText, guideStats.last?.kind === 'failed' && styles.debugBad]}>
@@ -347,6 +373,9 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
             )}
           </View>
         )}
+        <Pressable onPress={testPhoto} accessibilityRole="button" accessibilityLabel="Test one photo" style={styles.link}>
+          <Text style={styles.linkText}>Test one photo (camera check)</Text>
+        </Pressable>
         <Pressable onPress={() => setShowDebug((d) => !d)} accessibilityRole="button"
           accessibilityLabel={showDebug ? 'Hide debug counters' : 'Show debug counters'} style={styles.link}>
           <Text style={styles.linkText}>{showDebug ? 'Hide' : 'Show'} debug counters</Text>
