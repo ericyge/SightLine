@@ -18,7 +18,7 @@ from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import FileResponse, JSONResponse, Response  # noqa: E402
 
-from . import db, guidance, llm, memory, stt, tts  # noqa: E402
+from . import db, guidance, llm, memory, stt, tts, wake  # noqa: E402
 from .memory.api import router as memory_router  # noqa: E402
 from .memory.models import PlaceID  # noqa: E402
 from .memory.observation import UNKNOWN_ROOM, observe_and_save  # noqa: E402
@@ -241,7 +241,7 @@ def health():
     return HealthResponse(mode=v.mode, mock=v.mock, stt=client.provider if client else "browser",
                           vision=v.stats(), guide_max_fps=guide_max_fps(),
                           tts="elevenlabs" if tts.tts_enabled() else "browser",
-                          tts_guidance=tts.guidance_cues_mode())
+                          tts_guidance=tts.guidance_cues_mode(), wake=wake.availability()[0])
 
 
 @app.get("/api/profile", response_model=Profile)
@@ -443,6 +443,45 @@ async def speak(req: SpeakRequest, cached_only: bool = False):
             log.warning("TTS %s failed (%s)", client.provider, e)
             raise HTTPException(502, "Text-to-speech failed") from None
     return Response(audio, media_type=tts.MEDIA_TYPE, headers={"X-TTS-Cache": "hit" if hit else "miss"})
+
+
+@app.websocket("/ws/wake")
+async def ws_wake(ws: WebSocket):
+    """Wake word. The phone sends binary 16 kHz mono int16 audio; replies {"type":"wake"} on "Hey Jarvis".
+    Text "reset" clears the detector (send it before resuming after the phone captured a request).
+    Replies {"type":"ready"} once the model is loaded, or {"type":"error","reason":...} and closes."""
+    await ws.accept()
+    if not wake.acquire_slot():
+        await ws.send_json({"type": "error", "reason": "Too many wake listeners are connected."})
+        await ws.close(code=1013)
+        return
+    try:
+        try:
+            session = await run_in_threadpool(wake.new_session)
+        except wake.WakeUnavailable as e:
+            await ws.send_json({"type": "error", "reason": str(e)})
+            await ws.close(code=1011)
+            return
+        await ws.send_json({"type": "ready"})
+        while True:
+            message = await ws.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            if message.get("text") == "reset":
+                session.reset()
+            elif message.get("bytes") is not None:
+                chunk = message["bytes"]
+                if len(chunk) > wake.MAX_CHUNK_BYTES or len(chunk) % 2:
+                    await ws.send_json({"type": "error", "reason": "Send 16 kHz mono 16-bit audio in chunks under 64 KB."})
+                    await ws.close(code=1003)
+                    return
+                event = await run_in_threadpool(session.process, chunk, time.monotonic())
+                if event:   # only the event leaves; the audio is already gone
+                    await ws.send_json(event)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        wake.release_slot()
 
 
 @app.websocket("/ws/events")
