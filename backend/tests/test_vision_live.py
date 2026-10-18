@@ -326,6 +326,7 @@ def run_probe(monkeypatch, capsys, *args):
     path = Path(__file__).resolve().parents[1] / "scripts" / "perceptron_probe.py"
     spec = importlib.util.spec_from_file_location("perceptron_probe", path)
     probe = importlib.util.module_from_spec(spec)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)   # never read a developer's real .env
     spec.loader.exec_module(probe)
     monkeypatch.setattr("sys.argv", ["perceptron_probe.py", *args])
     code = probe.main()

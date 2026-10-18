@@ -3,6 +3,7 @@ import asyncio
 import base64
 import logging
 import os
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -17,10 +18,10 @@ from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import FileResponse, Response  # noqa: E402
 
-from . import db, guidance, llm, stt  # noqa: E402
+from . import db, guidance, llm, stt, tts  # noqa: E402
 from .events import broadcaster  # noqa: E402
 from .models import (ChatRequest, ChatResponse, GuideResponse, HealthResponse, ObserveResponse, OkResponse, Profile,  # noqa: E402
-                     TranscribeResponse, WhereLast, WhereResponse)
+                     SpeakRequest, TranscribeResponse, WhereLast, WhereResponse)
 from .vision import VisionBusy, get_vision  # noqa: E402
 
 log = logging.getLogger("sightline")
@@ -41,6 +42,8 @@ async def lifespan(app: FastAPI):
                 " (MOCK: fake detections, no API key needed)" if vision.mock else "",
                 llm.get_llm().provider)
     db.thumbs_dir().mkdir(parents=True, exist_ok=True)
+    if tts.tts_enabled():   # render the fixed guidance cues in the background so they play instantly
+        threading.Thread(target=tts.prewarm, daemon=True).start()
     yield
 
 
@@ -122,7 +125,9 @@ def health():
     v = get_vision()
     client = stt.get_stt()
     return HealthResponse(mode=v.mode, mock=v.mock, stt=client.provider if client else "browser",
-                          vision=v.stats(), guide_max_fps=guide_max_fps())
+                          vision=v.stats(), guide_max_fps=guide_max_fps(),
+                          tts="elevenlabs" if tts.tts_enabled() else "browser",
+                          tts_guidance=tts.guidance_cues_mode())
 
 
 @app.get("/api/profile", response_model=Profile)
@@ -280,6 +285,27 @@ async def transcribe(audio: UploadFile = File(...)):
         log.warning("STT %s failed (%s)", client.provider, e)
         raise HTTPException(502, "Speech-to-text failed") from None
     return TranscribeResponse(text=text, provider=client.provider)
+
+
+@app.post("/api/speak")
+async def speak(req: SpeakRequest, cached_only: bool = False):
+    """Reply text -> mp3 in the configured ElevenLabs voice. 503 when TTS is off, 502 on any provider
+    failure (the app then uses the phone's own voice). With ?cached_only=true a cache miss answers 204
+    immediately without calling ElevenLabs: that is how fast guidance cues use the voice only when free."""
+    client = tts.get_tts()
+    if client is None:
+        raise HTTPException(503, "Text-to-speech is not enabled; use the built-in voice")
+    audio = client.cached(req.text)
+    hit = audio is not None
+    if audio is None:
+        if cached_only:
+            return Response(status_code=204)
+        try:
+            audio = await run_in_threadpool(client.speak, req.text)
+        except tts.TTSError as e:   # the text being spoken is never logged
+            log.warning("TTS %s failed (%s)", client.provider, e)
+            raise HTTPException(502, "Text-to-speech failed") from None
+    return Response(audio, media_type=tts.MEDIA_TYPE, headers={"X-TTS-Cache": "hit" if hit else "miss"})
 
 
 @app.websocket("/ws/events")
