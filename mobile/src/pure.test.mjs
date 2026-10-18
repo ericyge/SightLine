@@ -1,7 +1,7 @@
 // Run with: npm test   (Node 22+ runs the .ts files directly; no browser, phone or extra packages)
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { SingleFlight, withTimeout } from './capture.ts';
+import { CameraWatchdog, SingleFlight, withTimeout } from './capture.ts';
 import { describeLast, emptyStats, errorText, record, StageError, summarize } from './frameStats.ts';
 import { angleDiff, cameraHeading, compensate, panFromAngle, pitchBoost } from './guidance.ts';
 import { guideIntervalMs, waitMs } from './pacing.ts';
@@ -273,4 +273,28 @@ test('capture: an error or a synchronous throw frees the guard', async () => {
   assert.equal(flight.inProgress, false);
   await assert.rejects(flight.run(() => { throw new Error('sync'); }, 500), /sync/);
   assert.equal(flight.inProgress, false);
+});
+
+test('watchdog: refusals while a photo is merely slow do not restart the camera', () => {
+  const w = new CameraWatchdog(3, 20_000, 10_000);
+  assert.equal(w.note(true, 'photo timed out', 15_000), false);
+  for (let t = 16_000; t < 30_000; t += 1000) assert.equal(w.note(true, 'previous photo still in progress', t), false);
+});
+
+test('watchdog: a photo stuck for a long time restarts the camera once, then waits out the cooldown', () => {
+  const w = new CameraWatchdog(3, 20_000, 10_000);
+  assert.equal(w.note(true, 'previous photo still in progress', 1_000), false);
+  assert.equal(w.note(true, 'previous photo still in progress', 20_999), false);
+  assert.equal(w.note(true, 'previous photo still in progress', 21_000), true);
+  assert.equal(w.note(true, 'previous photo still in progress', 22_000), false);   // cooling down
+});
+
+test('watchdog: repeated real camera errors restart, and a success resets everything', () => {
+  const w = new CameraWatchdog(3, 20_000, 10_000);
+  assert.equal(w.note(true, 'photo timed out', 20_000), false);
+  assert.equal(w.note(true, 'photo timed out', 40_000), false);
+  assert.equal(w.note(false, undefined, 41_000), false);                           // a good frame resets the count
+  assert.equal(w.note(true, 'photo timed out', 60_000), false);
+  assert.equal(w.note(true, 'photo timed out', 80_000), false);
+  assert.equal(w.note(true, 'photo timed out', 100_000), true);
 });

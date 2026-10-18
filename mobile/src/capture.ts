@@ -48,3 +48,44 @@ export class SingleFlight {
     return this.busy;
   }
 }
+
+/**
+ * Decides when to restart the camera. A slow photo is NOT a reason: restarting destroys the photo that is
+ * about to finish. Restart only when photos keep failing for real, or one has been stuck for a long time.
+ */
+export class CameraWatchdog {
+  private fails = 0;
+  private stuckSince: number | null = null;
+  private lastRestart = -Infinity;
+  private failsBeforeRestart: number;
+  private stuckMs: number;
+  private cooldownMs: number;
+
+  constructor(failsBeforeRestart: number, stuckMs: number, cooldownMs: number) {
+    this.failsBeforeRestart = failsBeforeRestart;
+    this.stuckMs = stuckMs;
+    this.cooldownMs = cooldownMs;
+  }
+
+  /** Report one finished attempt. Returns true when the camera should be restarted now. */
+  note(cameraFailed: boolean, error: string | undefined, now: number): boolean {
+    if (!cameraFailed) {
+      this.fails = 0;
+      this.stuckSince = null;
+      return false;
+    }
+    if (error?.includes('still in progress')) {
+      this.stuckSince ??= now;            // refused because an earlier photo has not finished
+    } else {
+      this.fails += 1;                    // a timeout or a real camera error
+    }
+    const stuck = this.stuckSince !== null && now - this.stuckSince >= this.stuckMs;
+    if ((this.fails >= this.failsBeforeRestart || stuck) && now - this.lastRestart >= this.cooldownMs) {
+      this.fails = 0;
+      this.stuckSince = null;
+      this.lastRestart = now;
+      return true;
+    }
+    return false;
+  }
+}

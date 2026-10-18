@@ -1,7 +1,7 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { AppState, Linking, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import Controls from './src/Controls';
 
 export default function App() {
@@ -51,6 +51,9 @@ export default function App() {
           style={StyleSheet.absoluteFill}
           facing="back"
           mode="picture"
+          // iOS defaults to full-resolution photos (huge on recent iPhones, seconds to process). The backend
+          // only needs 640 px, so ask for 640x480. Android sizes differ, so it keeps its default.
+          pictureSize={Platform.OS === 'ios' ? '640x480' : undefined}
           accessibilityLabel="Rear camera preview"
           onCameraReady={() => setCameraReady(true)}
           onMountError={() => { setCameraReady(false); setError('Camera unavailable. Please try again.'); }}

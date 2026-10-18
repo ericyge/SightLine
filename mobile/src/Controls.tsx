@@ -10,7 +10,7 @@ import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Api, type ChatResponse, type ChatTurn, type GuideResponse, type UploadFile } from './api';
 import { playBeep, prepareBeeps, releaseBeeps } from './beeps';
-import { SingleFlight } from './capture';
+import { CameraWatchdog, SingleFlight } from './capture';
 import {
   describeLast, emptyStats, errorText, type LoopStats, record, type Result, StageError, summarize,
 } from './frameStats';
@@ -28,10 +28,12 @@ const DEFAULT_SERVER = process.env.EXPO_PUBLIC_API_BASE ?? '';
 // after this long and show whatever error comes back in the debug counter.
 const CAMERA_WAIT_MS = 4000;
 // iOS refuses a new photo while the previous one is unfinished (CameraNotReadyException). Photos run
-// one at a time with a timeout, and repeated camera failures restart the camera to clear a stuck one.
-const CAPTURE_TIMEOUT_MS = 5000;
-const RESTART_AFTER_FAILS = 3;       // consecutive camera failures before restarting the camera
-const RESTART_COOLDOWN_MS = 10000;   // never restart more often than this
+// one at a time with a generous timeout (a slow photo must be allowed to finish). The camera is only
+// restarted when photos keep failing for real or one has been stuck for a long time (CameraWatchdog).
+const CAPTURE_TIMEOUT_MS = 15000;
+const RESTART_AFTER_FAILS = 3;       // real camera errors/timeouts in a row before restarting the camera
+const STUCK_RESTART_MS = 20000;      // an unfinished photo this long also triggers a restart
+const RESTART_COOLDOWN_MS = 15000;   // never restart more often than this
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -66,13 +68,12 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   const [showDebug, setShowDebug] = useState(true);
   const [restarts, setRestarts] = useState(0);                            // automatic camera restarts
   const [flight] = useState(() => new SingleFlight());                    // one photo at a time
+  const [watchdog] = useState(() => new CameraWatchdog(RESTART_AFTER_FAILS, STUCK_RESTART_MS, RESTART_COOLDOWN_MS));
   const [now, setNow] = useState(0);                                      // ticks so the 'Ns ago' text stays fresh
 
   const roomRef = useRef(room);
   const cameraReadyRef = useRef(cameraReady);
   const cameraStartedAt = useRef(0);   // when the camera view was (re)mounted, for the ready timeout
-  const cameraFails = useRef(0);
-  const lastRestart = useRef(0);
   useEffect(() => { roomRef.current = room; }, [room]);
   useEffect(() => { cameraReadyRef.current = cameraReady; }, [cameraReady]);
   useEffect(() => {
@@ -146,22 +147,16 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
   /** Wait for the camera (see CAMERA_WAIT_MS). */
   const cameraUsable = () => cameraReadyRef.current || Date.now() - cameraStartedAt.current > CAMERA_WAIT_MS;
 
-  /** After each frame: repeated camera failures restart the camera, which clears a stuck photo. */
+  /** After each frame: restart the camera if photos keep failing or one is stuck (see CameraWatchdog). */
   const afterAttempt = useCallback((r: Result) => {
-    if (r.kind === 'failed' && r.stage === 'camera') {
-      cameraFails.current += 1;
-      if (cameraFails.current >= RESTART_AFTER_FAILS && Date.now() - lastRestart.current > RESTART_COOLDOWN_MS) {
-        cameraFails.current = 0;
-        lastRestart.current = Date.now();
-        cameraStartedAt.current = Date.now();   // give the new camera view time to report ready
-        flight.reset();
-        setRestarts((n) => n + 1);
-        onRestartCamera();
-      }
-    } else {
-      cameraFails.current = 0;                  // the camera worked (or the failure was later in the pipeline)
+    const cameraFailed = r.kind === 'failed' && r.stage === 'camera';
+    if (watchdog.note(cameraFailed, r.error, Date.now())) {
+      cameraStartedAt.current = Date.now();   // give the new camera view time to report ready
+      flight.reset();
+      setRestarts((n) => n + 1);
+      onRestartCamera();
     }
-  }, [flight, onRestartCamera]);
+  }, [watchdog, flight, onRestartCamera]);
 
   // Memory: about one frame a second to /api/observe while not guiding. Starts as soon as the backend
   // connects and the camera is ready. Every outcome is counted so a failure shows up on screen.
