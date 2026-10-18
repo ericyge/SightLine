@@ -9,11 +9,13 @@ export default function App() {
   const [active, setActive] = useState(AppState.currentState === 'active');
   const [error, setError] = useState('');
   const [cameraKey, setCameraKey] = useState(0);
+  const [cameraReady, setCameraReady] = useState(false);   // set by CameraView's onCameraReady
   const cameraRef = useRef<CameraView>(null);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
       setActive(state === 'active');
+      if (state !== 'active') setCameraReady(false);   // the camera is released in the background
       if (state === 'active') {
         void refreshPermission().catch(() => setError('Could not check camera permission.'));
       }
@@ -48,10 +50,11 @@ export default function App() {
           facing="back"
           mode="picture"
           accessibilityLabel="Rear camera preview"
-          onMountError={() => setError('Camera unavailable. Please try again.')}
+          onCameraReady={() => setCameraReady(true)}
+          onMountError={() => { setCameraReady(false); setError('Camera unavailable. Please try again.'); }}
         />
       )}
-      {granted && active && !error && <Controls cameraRef={cameraRef} />}
+      {granted && active && !error && <Controls cameraRef={cameraRef} cameraReady={cameraReady} />}
       {(!granted || error) && (
         <View style={styles.message}>
           <Text style={styles.title} accessibilityRole="header">Sightline</Text>
@@ -67,7 +70,7 @@ export default function App() {
               accessibilityRole="button"
               accessibilityLabel={granted ? 'Retry camera' : blocked ? 'Open camera settings' : 'Allow camera access'}
               style={({ pressed }) => [styles.button, pressed && styles.pressed]}
-              onPress={granted ? () => { setError(''); setCameraKey((key) => key + 1); } : enableCamera}
+              onPress={granted ? () => { setError(''); setCameraReady(false); setCameraKey((key) => key + 1); } : enableCamera}
             >
               <Text style={styles.buttonText}>{granted ? 'Try again' : blocked ? 'Open Settings' : 'Allow camera'}</Text>
             </Pressable>

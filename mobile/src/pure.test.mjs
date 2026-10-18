@@ -1,6 +1,7 @@
 // Run with: npm test   (Node 22+ runs the .ts files directly; no browser, phone or extra packages)
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { describeLast, emptyStats, errorText, record, StageError, summarize } from './frameStats.ts';
 import { angleDiff, cameraHeading, compensate, panFromAngle, pitchBoost } from './guidance.ts';
 import { guideIntervalMs, waitMs } from './pacing.ts';
 import { createVoice, CUE_TIMEOUT_MS, REPLY_TIMEOUT_MS } from './voiceCore.ts';
@@ -186,4 +187,39 @@ test('voice: stop invalidates a pending reply', async () => {
   release();
   await pending;
   assert.deepEqual([log.played, log.builtin], [[], []]);
+});
+
+// ---- frame counters shown in the app ----
+
+test('frame stats: counts sent, ok, dropped and failed', () => {
+  let s = emptyStats();
+  s = record(s, { kind: 'ok', at: 1000, ms: 600 });
+  s = record(s, { kind: 'dropped', at: 2000, ms: 200 });
+  s = record(s, { kind: 'failed', at: 3000, ms: 50, stage: 'camera', error: 'camera ref is empty' });
+  s = record(s, { kind: 'failed', at: 4000, ms: 900, stage: 'resize', error: 'bad image' });
+  s = record(s, { kind: 'failed', at: 5000, ms: 8000, stage: 'upload', error: 'Network request failed' });
+  // a frame that failed in the camera or resize step was never sent; an upload failure was
+  assert.deepEqual({ sent: s.sent, ok: s.ok, dropped: s.dropped, failed: s.failed }, { sent: 3, ok: 1, dropped: 1, failed: 3 });
+  assert.equal(summarize('Memory', s), 'Memory: 3 sent · 1 ok · 1 dropped · 3 failed');
+});
+
+test('frame stats: the last attempt is described with its failing step', () => {
+  assert.equal(describeLast(emptyStats(), 0), 'nothing yet');
+  let s = record(emptyStats(), { kind: 'ok', at: 10_000, ms: 640 });
+  assert.equal(describeLast(s, 10_500), 'OK in 640 ms, just now');
+  assert.equal(describeLast(s, 15_000), 'OK in 640 ms, 5s ago');
+  s = record(s, { kind: 'dropped', at: 20_000, ms: 100 });
+  assert.equal(describeLast(s, 20_000), 'dropped (backend busy), just now');
+  s = record(s, { kind: 'failed', at: 30_000, ms: 10, stage: 'camera', error: 'camera ref is empty' });
+  assert.equal(describeLast(s, 33_000), 'FAILED at camera: camera ref is empty, 3s ago');
+});
+
+test('frame stats: error text is one short line, and StageError remembers its step', () => {
+  assert.equal(errorText(new Error('boom')), 'boom');
+  assert.equal(errorText(new TypeError('Network request failed')), 'TypeError: Network request failed');
+  assert.equal(errorText(new Error('line one' + String.fromCharCode(10) + '   line two')), 'line one line two');
+  assert.ok(errorText(new Error('x'.repeat(300))).length <= 90);
+  assert.equal(errorText(''), 'unknown error');
+  const e = new StageError('resize', 'bad');
+  assert.ok(e instanceof Error && e.stage === 'resize' && e.message === 'bad');
 });

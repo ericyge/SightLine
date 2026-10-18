@@ -10,6 +10,9 @@ import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Api, type ChatResponse, type ChatTurn, type GuideResponse, type UploadFile } from './api';
 import { playBeep, prepareBeeps, releaseBeeps } from './beeps';
+import {
+  describeLast, emptyStats, errorText, type LoopStats, record, type Result, StageError, summarize,
+} from './frameStats';
 import { compensate, panFromAngle, pitchBoost } from './guidance';
 import { getYaw, startOrientation, stopOrientation } from './orientation';
 import { configureVoice, releaseVoice, voice } from './voice';
@@ -20,6 +23,9 @@ const STALE_MS = 3000;       // silence beeps if the last guide response is olde
 const HISTORY_TURNS = 6;     // matches the backend limit
 const MIN_HOLD_MS = 300;     // shorter presses are treated as accidental taps
 const DEFAULT_SERVER = process.env.EXPO_PUBLIC_API_BASE ?? '';
+// Expo says to wait for the camera's onCameraReady before taking a photo. If it never fires, try anyway
+// after this long and show whatever error comes back in the debug counter.
+const CAMERA_WAIT_MS = 4000;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -29,7 +35,9 @@ function say(text: string, interrupt = false) {
   Speech.speak(text, { language: 'en-US' });
 }
 
-export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraView | null> }) {
+type Props = { cameraRef: RefObject<CameraView | null>; cameraReady: boolean };
+
+export default function Controls({ cameraRef, cameraReady }: Props) {
   const [server, setServer] = useState(DEFAULT_SERVER);
   const [showSettings, setShowSettings] = useState(!DEFAULT_SERVER);
   const api = useMemo(() => new Api(server), [server]);
@@ -43,9 +51,21 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
   const [guiding, setGuiding] = useState<string | null>(null);
   const [listening, setListening] = useState(false);
   const [typed, setTyped] = useState('');
+  const [memStats, setMemStats] = useState<LoopStats>(emptyStats);     // /api/observe frames
+  const [guideStats, setGuideStats] = useState<LoopStats>(emptyStats);   // /api/guide frames
+  const [showDebug, setShowDebug] = useState(true);
+  const [now, setNow] = useState(0);                                      // ticks so the 'Ns ago' text stays fresh
 
   const roomRef = useRef(room);
+  const cameraReadyRef = useRef(cameraReady);
+  const mountedAt = useRef(0);
   useEffect(() => { roomRef.current = room; }, [room]);
+  useEffect(() => { cameraReadyRef.current = cameraReady; }, [cameraReady]);
+  useEffect(() => {
+    mountedAt.current = Date.now();
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
   const history = useRef<ChatTurn[]>([]);
   const guideRef = useRef<{ last: GuideResponse | null; yawAtLast: number | null; at: number }>(
     { last: null, yawAtLast: null, at: 0 });
@@ -89,23 +109,48 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
     return () => { cancelled = true; };
   }, [api, server, attempt]);
 
-  /** One 640 px JPEG from the camera (no shutter sound). */
+  /** One 640 px JPEG from the camera (no shutter sound). Failures say which step broke. */
   const captureFrame = useCallback(async (): Promise<UploadFile> => {
-    const pic = await cameraRef.current?.takePictureAsync({ quality: 0.5, shutterSound: false });
-    if (!pic) throw new Error('camera not ready');
-    const small = await manipulateAsync(pic.uri, [{ resize: { width: 640 } }],
-      { compress: 0.6, format: SaveFormat.JPEG });
-    return { uri: small.uri, name: 'frame.jpg', type: 'image/jpeg' };
+    let pic;
+    try {
+      pic = await cameraRef.current?.takePictureAsync({ quality: 0.5, shutterSound: false });
+    } catch (e) {
+      throw new StageError('camera', errorText(e));
+    }
+    if (!pic) throw new StageError('camera', cameraRef.current ? 'no picture returned' : 'camera ref is empty');
+    try {
+      const small = await manipulateAsync(pic.uri, [{ resize: { width: 640 } }],
+        { compress: 0.6, format: SaveFormat.JPEG });
+      return { uri: small.uri, name: 'frame.jpg', type: 'image/jpeg' };
+    } catch (e) {
+      throw new StageError('resize', errorText(e));
+    }
   }, [cameraRef]);
 
-  // Memory: about one frame a second to /api/observe while not guiding.
+  /** Wait for the camera (see CAMERA_WAIT_MS). */
+  const cameraUsable = () => cameraReadyRef.current || Date.now() - mountedAt.current > CAMERA_WAIT_MS;
+
+  // Memory: about one frame a second to /api/observe while not guiding. Starts as soon as the backend
+  // connects and the camera is ready. Every outcome is counted so a failure shows up on screen.
   useEffect(() => {
     if (!connected || guiding) return;
     let cancelled = false;
     (async () => {
       while (!cancelled) {
+        if (!cameraUsable()) { await sleep(250); continue; }
         const t0 = Date.now();
-        try { await api.observe(await captureFrame(), roomRef.current); } catch { /* TODO(C): offline state */ }
+        let result: Result;
+        try {
+          const r = await api.observe(await captureFrame(), roomRef.current);
+          result = { kind: r ? 'ok' : 'dropped', at: Date.now(), ms: Date.now() - t0 };
+        } catch (e) {
+          result = {
+            kind: 'failed', at: Date.now(), ms: Date.now() - t0, error: errorText(e),
+            stage: e instanceof StageError ? e.stage : 'upload',
+          };
+        }
+        if (cancelled) break;
+        setMemStats((st) => record(st, result));
         await sleep(Math.max(0, LOOP_MS - (Date.now() - t0)));
       }
     })();
@@ -119,7 +164,9 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
     let cancelled = false;
     (async () => {
       while (!cancelled) {
+        if (!cameraUsable()) { await sleep(250); continue; }
         const t0 = Date.now();
+        let result: Result;
         try {
           const yaw = getYaw();
           const r = await api.guide(await captureFrame(), guiding, yaw);
@@ -129,9 +176,16 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
             guideRef.current = { last: r, yawAtLast: yaw, at: Date.now() };
             if (r.say) { void voice.cue(r.say); setCue(r.say); }
           }
-        } catch {
+          result = { kind: r ? 'ok' : 'dropped', at: Date.now(), ms: Date.now() - t0 };
+        } catch (e) {
           setStatus('Connection problem. Still trying.');
+          result = {
+            kind: 'failed', at: Date.now(), ms: Date.now() - t0, error: errorText(e),
+            stage: e instanceof StageError ? e.stage : 'upload',
+          };
         }
+        if (cancelled) break;
+        setGuideStats((st) => record(st, result));
         await sleep(waitMs(guideMs.current, Date.now() - t0));
       }
     })();
@@ -245,6 +299,28 @@ export default function Controls({ cameraRef }: { cameraRef: RefObject<CameraVie
             </Pressable>
           ))}
         </View>
+        {showDebug && (
+          // Debug counters for sighted helpers; hidden from screen readers so they are not read aloud.
+          <View style={styles.debug} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+            <Text style={styles.debugText}>
+              Camera: {cameraReady ? 'ready' : 'starting...'} | Backend: {connected ? 'connected' : 'NOT connected'}
+            </Text>
+            <Text style={styles.debugText}>{summarize('Memory', memStats)}</Text>
+            <Text style={[styles.debugText, memStats.last?.kind === 'failed' && styles.debugBad]}>
+              Last memory frame: {describeLast(memStats, now)}
+            </Text>
+            {guiding && <Text style={styles.debugText}>{summarize('Guide', guideStats)}</Text>}
+            {guiding && (
+              <Text style={[styles.debugText, guideStats.last?.kind === 'failed' && styles.debugBad]}>
+                Last guide frame: {describeLast(guideStats, now)}
+              </Text>
+            )}
+          </View>
+        )}
+        <Pressable onPress={() => setShowDebug((d) => !d)} accessibilityRole="button"
+          accessibilityLabel={showDebug ? 'Hide debug counters' : 'Show debug counters'} style={styles.link}>
+          <Text style={styles.linkText}>{showDebug ? 'Hide' : 'Show'} debug counters</Text>
+        </Pressable>
         <Pressable onPress={() => setShowSettings((s) => !s)} accessibilityRole="button"
           accessibilityLabel="Server settings" style={styles.link}>
           <Text style={styles.linkText}>{connected ? 'Connected' : 'Not connected'} · settings</Text>
@@ -303,6 +379,9 @@ const styles = StyleSheet.create({
   chipTextOn: { color: '#000', fontWeight: '700' },
   link: { minHeight: 44, justifyContent: 'center' },
   linkText: { color: '#9cf', fontSize: 16 },
+  debug: { backgroundColor: 'rgba(0,40,0,0.85)', borderRadius: 8, padding: 8, gap: 2 },
+  debugText: { color: '#9f9', fontSize: 14, lineHeight: 19 },
+  debugBad: { color: '#ff9b9b', fontWeight: '700' },
   settings: { flexDirection: 'row', gap: 8, alignItems: 'center' },
   input: { flex: 1, minHeight: 52, backgroundColor: '#fff', borderRadius: 10, paddingHorizontal: 12, fontSize: 18, color: '#000' },
   small: { minHeight: 52, minWidth: 80, backgroundColor: '#2d6cff', borderRadius: 10, alignItems: 'center', justifyContent: 'center' },

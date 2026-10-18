@@ -90,3 +90,13 @@ Further reading before the demo: `src/Controls.tsx` is the whole screen logic, m
 ## Voice (text-to-speech)
 
 Chat replies are spoken with the backend's ElevenLabs voice when `TTS_PROVIDER=elevenlabs` (root `.env`; see the root README). Fast guidance cues use the built-in voice, except fixed cues the server already has cached. If `/api/speak` fails or is slow, the app speaks with the built-in voice. Unverified: playback on real phones (`src/voice.ts` cannot detect a silent playback failure; TODO(C)).
+
+## Debug counters (what to look at when frames do not arrive)
+
+The green box at the top of the screen counts every frame: `Memory: N sent · ok · dropped · failed` and, while guiding, `Guide: ...`, plus the last result in plain words. A failure names the step that broke:
+- `FAILED at camera: ...` the photo could not be taken (the camera was not ready, or the permission/camera is unavailable)
+- `FAILED at resize: ...` the 640 px resize failed
+- `FAILED at upload: ...` the frame was taken but the backend could not be reached (for example `Network request failed`, `HTTP 500`, or a timeout)
+- `dropped (backend busy)` the backend answered 204 because Perceptron was still working on an earlier frame; this is normal
+
+"Camera: starting..." means the camera has not reported ready yet; the loops wait for it (up to 4 seconds, then they try anyway and show the error). Tap "Hide debug counters" to remove the box. It is hidden from screen readers.
