@@ -1,6 +1,7 @@
 // Run with: npm test   (Node 22+ runs the .ts files directly; no browser, phone or extra packages)
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { SingleFlight, withTimeout } from './capture.ts';
 import { describeLast, emptyStats, errorText, record, StageError, summarize } from './frameStats.ts';
 import { angleDiff, cameraHeading, compensate, panFromAngle, pitchBoost } from './guidance.ts';
 import { guideIntervalMs, waitMs } from './pacing.ts';
@@ -222,4 +223,54 @@ test('frame stats: error text is one short line, and StageError remembers its st
   assert.equal(errorText(''), 'unknown error');
   const e = new StageError('resize', 'bad');
   assert.ok(e instanceof Error && e.stage === 'resize' && e.message === 'bad');
+});
+
+// ---- photo guards: iOS refuses a new photo while the previous one is unfinished ----
+
+const never = () => new Promise(() => {});
+const later = (ms, value) => new Promise((r) => setTimeout(() => r(value), ms));
+
+test('capture: withTimeout resolves, rejects on error, and rejects when too slow', async () => {
+  assert.equal(await withTimeout(later(5, 'ok'), 500, 'slow'), 'ok');
+  await assert.rejects(withTimeout(Promise.reject(new Error('boom')), 500, 'slow'), /boom/);
+  await assert.rejects(withTimeout(never(), 20, 'photo timed out'), /photo timed out/);
+});
+
+test('capture: a second photo is refused (not queued) while the first is unfinished', async () => {
+  const flight = new SingleFlight();
+  let calls = 0;
+  const first = flight.run(() => { calls += 1; return later(40, 'photo'); }, 500);
+  await assert.rejects(flight.run(() => { calls += 1; return later(1, 'x'); }, 500), /previous photo still in progress/);
+  assert.equal(calls, 1, 'the native camera must not be called while busy');
+  assert.equal(await first, 'photo');
+  assert.equal(await flight.run(async () => 'next', 500), 'next', 'free again once the first settles');
+});
+
+test('capture: a timed-out photo keeps blocking until it settles, so the camera never overlaps', async () => {
+  const flight = new SingleFlight();
+  let finish;
+  const stuck = new Promise((r) => { finish = r; });
+  await assert.rejects(flight.run(() => stuck, 20), /photo timed out/);
+  assert.equal(flight.inProgress, true);
+  await assert.rejects(flight.run(async () => 'x', 500), /still in progress/);
+  finish('late');
+  await later(5);
+  assert.equal(flight.inProgress, false);
+  assert.equal(await flight.run(async () => 'ok', 500), 'ok');
+});
+
+test('capture: reset() clears a stuck photo after the camera is restarted', async () => {
+  const flight = new SingleFlight();
+  await assert.rejects(flight.run(never, 20), /timed out/);
+  flight.reset();
+  assert.equal(await flight.run(async () => 'fresh', 500), 'fresh');
+});
+
+test('capture: an error or a synchronous throw frees the guard', async () => {
+  const flight = new SingleFlight();
+  await assert.rejects(flight.run(() => Promise.reject(new Error('camera error')), 500), /camera error/);
+  await later(1);
+  assert.equal(flight.inProgress, false);
+  await assert.rejects(flight.run(() => { throw new Error('sync'); }, 500), /sync/);
+  assert.equal(flight.inProgress, false);
 });

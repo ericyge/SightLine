@@ -1,6 +1,6 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import Controls from './src/Controls';
 
@@ -11,6 +11,8 @@ export default function App() {
   const [cameraKey, setCameraKey] = useState(0);
   const [cameraReady, setCameraReady] = useState(false);   // set by CameraView's onCameraReady
   const cameraRef = useRef<CameraView>(null);
+  // Controls calls this when photos keep failing: remounting the camera clears a stuck capture on iOS.
+  const restartCamera = useCallback(() => { setCameraReady(false); setCameraKey((key) => key + 1); }, []);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
@@ -54,7 +56,7 @@ export default function App() {
           onMountError={() => { setCameraReady(false); setError('Camera unavailable. Please try again.'); }}
         />
       )}
-      {granted && active && !error && <Controls cameraRef={cameraRef} cameraReady={cameraReady} />}
+      {granted && active && !error && <Controls cameraRef={cameraRef} cameraReady={cameraReady} onRestartCamera={restartCamera} />}
       {(!granted || error) && (
         <View style={styles.message}>
           <Text style={styles.title} accessibilityRole="header">Sightline</Text>

@@ -10,6 +10,7 @@ import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Api, type ChatResponse, type ChatTurn, type GuideResponse, type UploadFile } from './api';
 import { playBeep, prepareBeeps, releaseBeeps } from './beeps';
+import { SingleFlight } from './capture';
 import {
   describeLast, emptyStats, errorText, type LoopStats, record, type Result, StageError, summarize,
 } from './frameStats';
@@ -26,6 +27,11 @@ const DEFAULT_SERVER = process.env.EXPO_PUBLIC_API_BASE ?? '';
 // Expo says to wait for the camera's onCameraReady before taking a photo. If it never fires, try anyway
 // after this long and show whatever error comes back in the debug counter.
 const CAMERA_WAIT_MS = 4000;
+// iOS refuses a new photo while the previous one is unfinished (CameraNotReadyException). Photos run
+// one at a time with a timeout, and repeated camera failures restart the camera to clear a stuck one.
+const CAPTURE_TIMEOUT_MS = 5000;
+const RESTART_AFTER_FAILS = 3;       // consecutive camera failures before restarting the camera
+const RESTART_COOLDOWN_MS = 10000;   // never restart more often than this
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -35,9 +41,13 @@ function say(text: string, interrupt = false) {
   Speech.speak(text, { language: 'en-US' });
 }
 
-type Props = { cameraRef: RefObject<CameraView | null>; cameraReady: boolean };
+type Props = {
+  cameraRef: RefObject<CameraView | null>;
+  cameraReady: boolean;
+  onRestartCamera: () => void;   // remounts the camera view (must be a stable function)
+};
 
-export default function Controls({ cameraRef, cameraReady }: Props) {
+export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Props) {
   const [server, setServer] = useState(DEFAULT_SERVER);
   const [showSettings, setShowSettings] = useState(!DEFAULT_SERVER);
   const api = useMemo(() => new Api(server), [server]);
@@ -54,15 +64,19 @@ export default function Controls({ cameraRef, cameraReady }: Props) {
   const [memStats, setMemStats] = useState<LoopStats>(emptyStats);     // /api/observe frames
   const [guideStats, setGuideStats] = useState<LoopStats>(emptyStats);   // /api/guide frames
   const [showDebug, setShowDebug] = useState(true);
+  const [restarts, setRestarts] = useState(0);                            // automatic camera restarts
+  const [flight] = useState(() => new SingleFlight());                    // one photo at a time
   const [now, setNow] = useState(0);                                      // ticks so the 'Ns ago' text stays fresh
 
   const roomRef = useRef(room);
   const cameraReadyRef = useRef(cameraReady);
-  const mountedAt = useRef(0);
+  const cameraStartedAt = useRef(0);   // when the camera view was (re)mounted, for the ready timeout
+  const cameraFails = useRef(0);
+  const lastRestart = useRef(0);
   useEffect(() => { roomRef.current = room; }, [room]);
   useEffect(() => { cameraReadyRef.current = cameraReady; }, [cameraReady]);
   useEffect(() => {
-    mountedAt.current = Date.now();
+    cameraStartedAt.current = Date.now();
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
@@ -111,13 +125,15 @@ export default function Controls({ cameraRef, cameraReady }: Props) {
 
   /** One 640 px JPEG from the camera (no shutter sound). Failures say which step broke. */
   const captureFrame = useCallback(async (): Promise<UploadFile> => {
+    const camera = cameraRef.current;
+    if (!camera) throw new StageError('camera', 'camera ref is empty');
     let pic;
     try {
-      pic = await cameraRef.current?.takePictureAsync({ quality: 0.5, shutterSound: false });
+      pic = await flight.run(() => camera.takePictureAsync({ quality: 0.5, shutterSound: false }), CAPTURE_TIMEOUT_MS);
     } catch (e) {
       throw new StageError('camera', errorText(e));
     }
-    if (!pic) throw new StageError('camera', cameraRef.current ? 'no picture returned' : 'camera ref is empty');
+    if (!pic) throw new StageError('camera', 'no picture returned');
     try {
       const small = await manipulateAsync(pic.uri, [{ resize: { width: 640 } }],
         { compress: 0.6, format: SaveFormat.JPEG });
@@ -125,10 +141,27 @@ export default function Controls({ cameraRef, cameraReady }: Props) {
     } catch (e) {
       throw new StageError('resize', errorText(e));
     }
-  }, [cameraRef]);
+  }, [cameraRef, flight]);
 
   /** Wait for the camera (see CAMERA_WAIT_MS). */
-  const cameraUsable = () => cameraReadyRef.current || Date.now() - mountedAt.current > CAMERA_WAIT_MS;
+  const cameraUsable = () => cameraReadyRef.current || Date.now() - cameraStartedAt.current > CAMERA_WAIT_MS;
+
+  /** After each frame: repeated camera failures restart the camera, which clears a stuck photo. */
+  const afterAttempt = useCallback((r: Result) => {
+    if (r.kind === 'failed' && r.stage === 'camera') {
+      cameraFails.current += 1;
+      if (cameraFails.current >= RESTART_AFTER_FAILS && Date.now() - lastRestart.current > RESTART_COOLDOWN_MS) {
+        cameraFails.current = 0;
+        lastRestart.current = Date.now();
+        cameraStartedAt.current = Date.now();   // give the new camera view time to report ready
+        flight.reset();
+        setRestarts((n) => n + 1);
+        onRestartCamera();
+      }
+    } else {
+      cameraFails.current = 0;                  // the camera worked (or the failure was later in the pipeline)
+    }
+  }, [flight, onRestartCamera]);
 
   // Memory: about one frame a second to /api/observe while not guiding. Starts as soon as the backend
   // connects and the camera is ready. Every outcome is counted so a failure shows up on screen.
@@ -151,11 +184,12 @@ export default function Controls({ cameraRef, cameraReady }: Props) {
         }
         if (cancelled) break;
         setMemStats((st) => record(st, result));
+        afterAttempt(result);
         await sleep(Math.max(0, LOOP_MS - (Date.now() - t0)));
       }
     })();
     return () => { cancelled = true; };
-  }, [api, connected, guiding, captureFrame]);
+  }, [api, connected, guiding, captureFrame, afterAttempt]);
 
   // Guidance: as fast as the backend answers, capped (GUIDE_MAX_FPS), one request in flight and never
   // queued; plus a fast local loop that plays the beeps and keeps the pan right between answers.
@@ -186,6 +220,7 @@ export default function Controls({ cameraRef, cameraReady }: Props) {
         }
         if (cancelled) break;
         setGuideStats((st) => record(st, result));
+        afterAttempt(result);
         await sleep(waitMs(guideMs.current, Date.now() - t0));
       }
     })();
@@ -203,7 +238,7 @@ export default function Controls({ cameraRef, cameraReady }: Props) {
       }
     })();
     return () => { cancelled = true; guideRef.current = { last: null, yawAtLast: null, at: 0 }; };
-  }, [api, guiding, captureFrame]);
+  }, [api, guiding, captureFrame, afterAttempt]);
 
   const stopGuidance = useCallback(() => {
     setGuiding(null);
@@ -303,7 +338,7 @@ export default function Controls({ cameraRef, cameraReady }: Props) {
           // Debug counters for sighted helpers; hidden from screen readers so they are not read aloud.
           <View style={styles.debug} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
             <Text style={styles.debugText}>
-              Camera: {cameraReady ? 'ready' : 'starting...'} | Backend: {connected ? 'connected' : 'NOT connected'}
+              Camera: {cameraReady ? 'ready' : 'starting...'}{restarts > 0 ? ` (restarted ${restarts}x)` : ''} | Backend: {connected ? 'connected' : 'NOT connected'}
             </Text>
             <Text style={styles.debugText}>{summarize('Memory', memStats)}</Text>
             <Text style={[styles.debugText, memStats.last?.kind === 'failed' && styles.debugBad]}>
