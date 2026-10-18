@@ -16,6 +16,7 @@ import {
 } from './frameStats';
 import { compensate, panFromAngle, pitchBoost } from './guidance';
 import { getYaw, startOrientation, stopOrientation } from './orientation';
+import { loadServer, saveServer } from './serverStore';
 import { configureVoice, releaseVoice, voice } from './voice';
 import { guideIntervalMs, waitMs } from './pacing';
 
@@ -50,8 +51,10 @@ type Props = {
 };
 
 export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Props) {
-  const [server, setServer] = useState(DEFAULT_SERVER);
-  const [showSettings, setShowSettings] = useState(!DEFAULT_SERVER);
+  // The address survives reloads: the last one that connected is read back from a small file.
+  const [initialServer] = useState(() => DEFAULT_SERVER || loadServer());
+  const [server, setServer] = useState(initialServer);
+  const [showSettings, setShowSettings] = useState(!initialServer);
   const api = useMemo(() => new Api(server), [server]);
   const [connected, setConnected] = useState(false);
   const [mock, setMock] = useState(false);
@@ -108,6 +111,7 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
         const [health, profile] = await Promise.all([api.health(), api.profile()]);
         if (cancelled) return;
         setConnected(true);
+        saveServer(server);   // remember it for the next reload
         setMock(health.mock);
         setStt(health.stt);
         configureVoice(api, health);   // ElevenLabs voice on/off and the guidance-cue setting
@@ -354,6 +358,11 @@ export default function Controls({ cameraRef, cameraReady, onRestartCamera }: Pr
             <Text style={styles.debugText}>
               Camera: {cameraReady ? 'ready' : 'starting...'}{restarts > 0 ? ` (restarted ${restarts}x)` : ''} | Backend: {connected ? 'connected' : 'NOT connected'}
             </Text>
+            {!connected && (
+              <Text style={[styles.debugText, styles.debugBad]}>
+                Photos only start after the backend connects. Open settings, enter the server address and press Connect.
+              </Text>
+            )}
             <Text style={styles.debugText}>
               Photo: {flight.inProgress ? `in progress for ${Math.round(flight.ageMs(now) / 1000)}s` : 'idle'}
             </Text>
